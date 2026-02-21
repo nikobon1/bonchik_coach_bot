@@ -101,7 +101,11 @@ export const isModeMenuRequest = (text: string): boolean => {
 
 export const isModeInfoRequest = (text: string): boolean => {
   const normalized = text.trim().toLowerCase();
-  return normalized === '/mode info' || normalized === 'ℹ️ режимы — кратко';
+  return (
+    normalized === '/mode info' ||
+    normalized === 'ℹ️ режимы — кратко' ||
+    normalized === 'ℹ️ кратко о режимах'
+  );
 };
 
 export const parseCoachModeCommand = (text: string): CoachMode | null => {
@@ -135,11 +139,11 @@ export const buildModeKeyboard = (): {
   resize_keyboard: boolean;
 } => ({
   keyboard: [
+    [{ text: 'ℹ️ Кратко о режимах' }],
     [{ text: '🎯 Реальность' }, { text: '🧠 Искажения' }],
     [{ text: '🚫 Самосаботаж' }, { text: '⚡ Активация' }],
     [{ text: '🌿 Тревога' }, { text: '🧭 Решение' }],
-    [{ text: '🔁 Перезапуск' }],
-    [{ text: 'ℹ️ Режимы — кратко' }]
+    [{ text: '🔁 Перезапуск' }]
   ],
   resize_keyboard: true
 });
@@ -155,4 +159,4 @@ export const renderModeDescriptionsRu = (): string =>
       const strategy = getCoachStrategy(mode);
       return `${strategy.labelRu} (${strategy.mode}) — ${strategy.shortDescriptionRu}`;
     })
-    .join('\n');
+    .join('\n\n');
