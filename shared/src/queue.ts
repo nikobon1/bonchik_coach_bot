@@ -10,7 +10,13 @@ export type TelegramJobPayload = {
   text: string;
 };
 
-export type TelegramJobProcessor = (payload: TelegramJobPayload) => Promise<void>;
+export type TelegramJobContext = {
+  jobId: string;
+  queue: string;
+  attemptsMade: number;
+};
+
+export type TelegramJobProcessor = (payload: TelegramJobPayload, context: TelegramJobContext) => Promise<void>;
 
 export const createTelegramQueue = (redisUrl: string) =>
   new Queue<TelegramJobPayload>(TELEGRAM_QUEUE, {
@@ -37,8 +43,22 @@ export const createTelegramWorker = (
   new Worker<TelegramJobPayload>(
     TELEGRAM_QUEUE,
     async (job: Job<TelegramJobPayload>) => {
-      logger.info({ jobId: job.id, queue: TELEGRAM_QUEUE }, 'Processing telegram job');
-      await processor(job.data);
+      const context: TelegramJobContext = {
+        jobId: String(job.id ?? 'unknown'),
+        queue: TELEGRAM_QUEUE,
+        attemptsMade: job.attemptsMade
+      };
+
+      logger.info(
+        {
+          ...context,
+          chatId: job.data.chatId,
+          userId: job.data.userId
+        },
+        'Processing telegram job'
+      );
+
+      await processor(job.data, context);
     },
     {
       connection: { url: redisUrl },

@@ -8,6 +8,7 @@ import {
   loadConfig,
   runMigrations,
   sendTelegramMessage,
+  type TelegramJobContext,
   type TelegramJobPayload
 } from '@bonchik/shared';
 
@@ -17,32 +18,64 @@ type RetryOptions = {
   attempts: number;
   baseDelayMs: number;
   shouldRetry: (error: unknown) => boolean;
+  onRetry?: (error: unknown, attempt: number, waitMs: number) => void;
+};
+type WorkerMetrics = {
+  processed: number;
+  succeeded: number;
+  failed: number;
+  openRouterRetries: number;
+  telegramRetries: number;
+  fallbacks: number;
 };
 
 const OPENROUTER_TIMEOUT_MS = 20_000;
 const TELEGRAM_MESSAGE_MAX_LENGTH = 4000;
 const FALLBACK_REPLY =
   'Sorry, I could not process that request right now. Please try again in a few seconds.';
+const METRICS_SNAPSHOT_INTERVAL_MS = 60_000;
 
 const startWorker = async (): Promise<void> => {
   const config = loadConfig();
   const logger = createLogger('worker');
+  const metrics = createInitialMetrics();
   const pool = createDbPool(config.DATABASE_URL);
   await runMigrations(pool);
 
-  const worker = createTelegramWorker(config.REDIS_URL, logger, async (payload) =>
-    processTelegramJob(
-      payload,
-      pool,
-      config.OPENROUTER_API_KEY,
-      config.OPENROUTER_MODEL_REPORTER,
-      config.TELEGRAM_BOT_TOKEN,
-      logger
-    )
-  );
+  const worker = createTelegramWorker(config.REDIS_URL, logger, async (payload, context) => {
+    const correlation = toCorrelation(payload, context);
+    metrics.processed += 1;
+    logger.info(correlation, 'Job started');
+
+    try {
+      await processTelegramJob(
+        payload,
+        context,
+        pool,
+        config.OPENROUTER_API_KEY,
+        config.OPENROUTER_MODEL_REPORTER,
+        config.TELEGRAM_BOT_TOKEN,
+        logger,
+        metrics
+      );
+      metrics.succeeded += 1;
+      logger.info(correlation, 'Job succeeded');
+    } catch (error) {
+      metrics.failed += 1;
+      logger.error({ err: error, ...correlation }, 'Job failed');
+      throw error;
+    }
+  });
+
+  const metricsInterval = setInterval(() => {
+    logMetricsSnapshot(logger, metrics);
+  }, METRICS_SNAPSHOT_INTERVAL_MS);
+  metricsInterval.unref();
 
   const shutdown = async (signal: string): Promise<void> => {
     logger.info({ signal }, 'Shutting down worker');
+    clearInterval(metricsInterval);
+    logMetricsSnapshot(logger, metrics);
     await worker.close();
     await pool.end();
     process.exit(0);
@@ -61,11 +94,13 @@ const startWorker = async (): Promise<void> => {
 
 const processTelegramJob = async (
   payload: TelegramJobPayload,
+  context: TelegramJobContext,
   pool: DbPool,
   openRouterApiKey: string,
   openRouterModel: string,
   telegramBotToken: string,
-  logger: AppLogger
+  logger: AppLogger,
+  metrics: WorkerMetrics
 ): Promise<void> => {
   await appendChatMessage(pool, {
     chatId: payload.chatId,
@@ -78,8 +113,10 @@ const processTelegramJob = async (
   const history = await getRecentChatHistory(pool, payload.chatId, 12);
   const generatedAnswer = await buildAnswer({
     chatId: payload.chatId,
+    context,
     history,
     logger,
+    metrics,
     openRouterApiKey,
     openRouterModel
   });
@@ -96,7 +133,19 @@ const processTelegramJob = async (
     {
       attempts: 3,
       baseDelayMs: 500,
-      shouldRetry: isRetryableNetworkError
+      shouldRetry: isRetryableNetworkError,
+      onRetry: (error, attempt, waitMs) => {
+        metrics.telegramRetries += 1;
+        logger.warn(
+          {
+            err: error,
+            ...toCorrelation(payload, context),
+            attempt,
+            waitMs
+          },
+          'Retrying Telegram send'
+        );
+      }
     }
   );
 
@@ -111,14 +160,18 @@ const processTelegramJob = async (
 
 const buildAnswer = async ({
   chatId,
+  context,
   history,
   logger,
+  metrics,
   openRouterApiKey,
   openRouterModel
 }: {
   chatId: number;
+  context: TelegramJobContext;
   history: Array<{ role: 'user' | 'assistant'; content: string }>;
   logger: AppLogger;
+  metrics: WorkerMetrics;
   openRouterApiKey: string;
   openRouterModel: string;
 }): Promise<string> => {
@@ -144,11 +197,25 @@ const buildAnswer = async ({
       {
         attempts: 3,
         baseDelayMs: 800,
-        shouldRetry: isRetryableNetworkError
+        shouldRetry: isRetryableNetworkError,
+        onRetry: (error, attempt, waitMs) => {
+          metrics.openRouterRetries += 1;
+          logger.warn(
+            {
+              err: error,
+              chatId,
+              context,
+              attempt,
+              waitMs
+            },
+            'Retrying OpenRouter request'
+          );
+        }
       }
     );
   } catch (error) {
-    logger.warn({ err: error, chatId }, 'Falling back due to OpenRouter error');
+    metrics.fallbacks += 1;
+    logger.warn({ err: error, chatId, context }, 'Falling back due to OpenRouter error');
     return FALLBACK_REPLY;
   }
 };
@@ -192,6 +259,7 @@ const retryAsync = async <T>(operation: () => Promise<T>, options: RetryOptions)
         throw error;
       }
       const waitMs = options.baseDelayMs * 2 ** (attempt - 1);
+      options.onRetry?.(error, attempt, waitMs);
       await delay(waitMs);
     }
   }
@@ -225,5 +293,40 @@ const isRetryableNetworkError = (error: unknown): boolean => {
 
   return /(408|409|425|429|500|502|503|504)/.test(message);
 };
+
+const createInitialMetrics = (): WorkerMetrics => ({
+  processed: 0,
+  succeeded: 0,
+  failed: 0,
+  openRouterRetries: 0,
+  telegramRetries: 0,
+  fallbacks: 0
+});
+
+const logMetricsSnapshot = (logger: AppLogger, metrics: WorkerMetrics): void => {
+  logger.info(
+    {
+      metrics: {
+        processed: metrics.processed,
+        succeeded: metrics.succeeded,
+        failed: metrics.failed,
+        openRouterRetries: metrics.openRouterRetries,
+        telegramRetries: metrics.telegramRetries,
+        fallbacks: metrics.fallbacks
+      }
+    },
+    'Worker metrics snapshot'
+  );
+};
+
+const toCorrelation = (
+  payload: TelegramJobPayload,
+  context: TelegramJobContext
+): { jobId: string; queue: string; chatId: number; userId: number } => ({
+  jobId: context.jobId,
+  queue: context.queue,
+  chatId: payload.chatId,
+  userId: payload.userId
+});
 
 void startWorker();
