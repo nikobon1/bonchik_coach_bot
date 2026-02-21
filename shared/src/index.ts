@@ -5,6 +5,7 @@ export * from './logger';
 export * from './migrations';
 export * from './openrouter';
 export * from './queue';
+export * from './rate-limit';
 export * from './redis';
 export * from './telegram';
 export * from './updates';

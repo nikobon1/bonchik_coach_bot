@@ -6,6 +6,7 @@ import {
   createTelegramDlqQueue,
   createTelegramQueue,
   createRedisConnection,
+  consumeRateLimit,
   enqueueTelegramJob,
   getQueueCounts,
   listQueueJobs,
@@ -29,6 +30,11 @@ export const startServer = async (): Promise<void> => {
   const app = buildApp({
     logger,
     adminApiKey: config.ADMIN_API_KEY,
+    rateLimit: {
+      checkWebhook: (clientKey) =>
+        consumeRateLimit(redis, `ratelimit:webhook:${clientKey}`, 60, 60),
+      checkAdmin: (clientKey) => consumeRateLimit(redis, `ratelimit:admin:${clientKey}`, 30, 60)
+    },
     checks: {
       checkDb: () => checkDbHealth(pool),
       checkRedis: () => pingRedis(redis)

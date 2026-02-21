@@ -10,6 +10,10 @@ type BuildAppOptions = {
   logger: FastifyBaseLogger;
   checks: HealthChecks;
   adminApiKey?: string;
+  rateLimit: {
+    checkWebhook: (clientKey: string) => Promise<{ allowed: boolean; retryAfterSec: number }>;
+    checkAdmin: (clientKey: string) => Promise<{ allowed: boolean; retryAfterSec: number }>;
+  };
   telegram: {
     webhookSecret?: string;
     enqueueMessage: (payload: TelegramMessagePayload) => Promise<void>;
@@ -56,7 +60,7 @@ const requeueParamsSchema = z.object({
   jobId: z.string().min(1)
 });
 
-export const buildApp = ({ logger, checks, telegram, adminApiKey }: BuildAppOptions): FastifyInstance => {
+export const buildApp = ({ logger, checks, telegram, adminApiKey, rateLimit }: BuildAppOptions): FastifyInstance => {
   const app = Fastify({ loggerInstance: logger });
 
   app.get('/health', async (_request, reply) => {
@@ -76,7 +80,17 @@ export const buildApp = ({ logger, checks, telegram, adminApiKey }: BuildAppOpti
     }
   });
 
-  app.post('/telegram/webhook', async (request) => {
+  app.post('/telegram/webhook', async (request, reply) => {
+    const webhookRate = await rateLimit.checkWebhook(getClientKey(request.headers['x-forwarded-for'], request.ip));
+    if (!webhookRate.allowed) {
+      reply.code(429);
+      return {
+        ok: false,
+        error: 'rate_limited',
+        retryAfterSec: webhookRate.retryAfterSec
+      };
+    }
+
     if (!isWebhookAuthorized(request.headers['x-telegram-bot-api-secret-token'], telegram.webhookSecret)) {
       return { ok: true, skipped: true };
     }
@@ -103,6 +117,10 @@ export const buildApp = ({ logger, checks, telegram, adminApiKey }: BuildAppOpti
   });
 
   app.get('/admin/queue/health', async (request, reply) => {
+    if (!(await isAdminWithinRateLimit(rateLimit, request.headers['x-forwarded-for'], request.ip))) {
+      reply.code(429);
+      return { ok: false, error: 'rate_limited' };
+    }
     if (!isAdminAuthorized(request.headers['x-admin-key'], adminApiKey)) {
       reply.code(401);
       return { ok: false };
@@ -115,6 +133,10 @@ export const buildApp = ({ logger, checks, telegram, adminApiKey }: BuildAppOpti
   });
 
   app.get('/admin/queue/failed', async (request, reply) => {
+    if (!(await isAdminWithinRateLimit(rateLimit, request.headers['x-forwarded-for'], request.ip))) {
+      reply.code(429);
+      return { ok: false, error: 'rate_limited' };
+    }
     if (!isAdminAuthorized(request.headers['x-admin-key'], adminApiKey)) {
       reply.code(401);
       return { ok: false };
@@ -128,6 +150,10 @@ export const buildApp = ({ logger, checks, telegram, adminApiKey }: BuildAppOpti
   });
 
   app.get('/admin/queue/dlq', async (request, reply) => {
+    if (!(await isAdminWithinRateLimit(rateLimit, request.headers['x-forwarded-for'], request.ip))) {
+      reply.code(429);
+      return { ok: false, error: 'rate_limited' };
+    }
     if (!isAdminAuthorized(request.headers['x-admin-key'], adminApiKey)) {
       reply.code(401);
       return { ok: false };
@@ -141,6 +167,10 @@ export const buildApp = ({ logger, checks, telegram, adminApiKey }: BuildAppOpti
   });
 
   app.post('/admin/queue/dlq/requeue/:jobId', async (request, reply) => {
+    if (!(await isAdminWithinRateLimit(rateLimit, request.headers['x-forwarded-for'], request.ip))) {
+      reply.code(429);
+      return { ok: false, error: 'rate_limited' };
+    }
     if (!isAdminAuthorized(request.headers['x-admin-key'], adminApiKey)) {
       reply.code(401);
       return { ok: false };
@@ -176,4 +206,19 @@ const isWebhookAuthorized = (headerValue: string | string[] | undefined, webhook
   }
   const token = Array.isArray(headerValue) ? headerValue[0] : headerValue;
   return token === webhookSecret;
+};
+
+const getClientKey = (forwardedForHeader: string | string[] | undefined, fallbackIp: string): string => {
+  const value = Array.isArray(forwardedForHeader) ? forwardedForHeader[0] : forwardedForHeader;
+  const ip = value?.split(',')[0]?.trim();
+  return ip || fallbackIp || 'unknown';
+};
+
+const isAdminWithinRateLimit = async (
+  rateLimit: BuildAppOptions['rateLimit'],
+  forwardedForHeader: string | string[] | undefined,
+  fallbackIp: string
+): Promise<boolean> => {
+  const result = await rateLimit.checkAdmin(getClientKey(forwardedForHeader, fallbackIp));
+  return result.allowed;
 };

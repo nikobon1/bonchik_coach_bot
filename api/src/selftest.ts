@@ -9,6 +9,10 @@ const run = async (): Promise<void> => {
   const healthyApp = buildApp({
     logger: createLogger('api-test'),
     adminApiKey: 'test-admin-key',
+    rateLimit: {
+      checkWebhook: async () => ({ allowed: true, retryAfterSec: 0 }),
+      checkAdmin: async () => ({ allowed: true, retryAfterSec: 0 })
+    },
     checks: {
       checkDb: async () => undefined,
       checkRedis: async () => undefined
@@ -107,8 +111,53 @@ const run = async (): Promise<void> => {
 
   await healthyApp.close();
 
+  const rateLimitedApp = buildApp({
+    logger: createLogger('api-test'),
+    adminApiKey: 'test-admin-key',
+    rateLimit: {
+      checkWebhook: async () => ({ allowed: false, retryAfterSec: 60 }),
+      checkAdmin: async () => ({ allowed: false, retryAfterSec: 60 })
+    },
+    checks: {
+      checkDb: async () => undefined,
+      checkRedis: async () => undefined
+    },
+    telegram: {
+      webhookSecret: 'test-webhook-secret',
+      enqueueMessage: async () => undefined,
+      markUpdateProcessed: async () => true,
+      getQueueHealth: async () => ({
+        main: { waiting: 0, active: 0, completed: 0, failed: 0, delayed: 0 },
+        dlq: { waiting: 0, active: 0, completed: 0, failed: 0, delayed: 0 }
+      }),
+      getFailedJobs: async () => [],
+      getDlqJobs: async () => [],
+      requeueDlqJob: async () => false
+    }
+  });
+
+  const limitedWebhook = await rateLimitedApp.inject({
+    method: 'POST',
+    url: '/telegram/webhook',
+    payload: { update_id: 999 }
+  });
+  assert.equal(limitedWebhook.statusCode, 429);
+
+  const limitedAdmin = await rateLimitedApp.inject({
+    method: 'GET',
+    url: '/admin/queue/health',
+    headers: { 'x-admin-key': 'test-admin-key' }
+  });
+  assert.equal(limitedAdmin.statusCode, 429);
+
+  await rateLimitedApp.close();
+
   const degradedApp = buildApp({
     logger: createLogger('api-test'),
+    rateLimit: {
+      checkWebhook: async () => ({ allowed: true, retryAfterSec: 0 }),
+      checkAdmin: async () => ({ allowed: true, retryAfterSec: 0 })
+    },
     checks: {
       checkDb: async () => {
         throw new Error('db down');
