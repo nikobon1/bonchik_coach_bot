@@ -1,0 +1,29 @@
+{
+  "name": "bonchik-coach-bot",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "api",
+    "workers",
+    "shared"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "dev": "concurrently \"npm run dev:api\" \"npm run dev:worker\"",
+    "dev:api": "npm --workspace @bonchik/api run dev",
+    "dev:worker": "npm --workspace @bonchik/workers run dev",
+    "start:api": "npm --workspace @bonchik/api run start",
+    "start:worker": "npm --workspace @bonchik/workers run start",
+    "lint": "eslint . --ext .ts,.js",
+    "typecheck": "tsc -b",
+    "test": "npm run build && node api/dist/selftest.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.8",
+    "@typescript-eslint/eslint-plugin": "^8.25.0",
+    "@typescript-eslint/parser": "^8.25.0",
+    "concurrently": "^9.1.2",
+    "eslint": "^8.57.1",
+    "typescript": "^5.7.3"
+  }
+}
