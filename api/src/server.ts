@@ -10,6 +10,7 @@ import {
   getQueueCounts,
   listQueueJobs,
   loadConfig,
+  markTelegramUpdateProcessed,
   pingRedis,
   requeueDlqJob,
   runMigrations,
@@ -33,9 +34,11 @@ export const startServer = async (): Promise<void> => {
       checkRedis: () => pingRedis(redis)
     },
     telegram: {
+      webhookSecret: config.TELEGRAM_WEBHOOK_SECRET,
       enqueueMessage: async (payload) => {
         await enqueueTelegramJob(queue, payload);
       },
+      markUpdateProcessed: (updateId) => markTelegramUpdateProcessed(pool, updateId),
       getQueueHealth: async () => ({
         main: await getQueueCounts(queue),
         dlq: await getQueueCounts(dlqQueue)
@@ -59,7 +62,8 @@ export const startServer = async (): Promise<void> => {
     try {
       await setTelegramWebhook({
         botToken: config.TELEGRAM_BOT_TOKEN,
-        appUrl: config.APP_URL
+        appUrl: config.APP_URL,
+        secretToken: config.TELEGRAM_WEBHOOK_SECRET
       });
       logger.info({ appUrl: config.APP_URL }, 'Telegram webhook configured');
     } catch (error) {

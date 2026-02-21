@@ -11,7 +11,9 @@ type BuildAppOptions = {
   checks: HealthChecks;
   adminApiKey?: string;
   telegram: {
+    webhookSecret?: string;
     enqueueMessage: (payload: TelegramMessagePayload) => Promise<void>;
+    markUpdateProcessed: (updateId: number) => Promise<boolean>;
     getQueueHealth: () => Promise<{
       main: Record<string, number>;
       dlq: Record<string, number>;
@@ -23,6 +25,7 @@ type BuildAppOptions = {
 };
 
 type TelegramMessagePayload = {
+  updateId: number;
   chatId: number;
   userId: number;
   username?: string;
@@ -30,6 +33,7 @@ type TelegramMessagePayload = {
 };
 
 const telegramUpdateSchema = z.object({
+  update_id: z.number().int(),
   message: z
     .object({
       text: z.string().min(1),
@@ -73,12 +77,22 @@ export const buildApp = ({ logger, checks, telegram, adminApiKey }: BuildAppOpti
   });
 
   app.post('/telegram/webhook', async (request) => {
+    if (!isWebhookAuthorized(request.headers['x-telegram-bot-api-secret-token'], telegram.webhookSecret)) {
+      return { ok: true, skipped: true };
+    }
+
     const parsed = telegramUpdateSchema.safeParse(request.body);
     if (!parsed.success || !parsed.data.message) {
       return { ok: true, skipped: true };
     }
 
+    const isNewUpdate = await telegram.markUpdateProcessed(parsed.data.update_id);
+    if (!isNewUpdate) {
+      return { ok: true, duplicate: true };
+    }
+
     await telegram.enqueueMessage({
+      updateId: parsed.data.update_id,
       chatId: parsed.data.message.chat.id,
       userId: parsed.data.message.from.id,
       username: parsed.data.message.from.username,
@@ -154,4 +168,12 @@ const isAdminAuthorized = (headerValue: string | string[] | undefined, adminApiK
   }
   const token = Array.isArray(headerValue) ? headerValue[0] : headerValue;
   return token === adminApiKey;
+};
+
+const isWebhookAuthorized = (headerValue: string | string[] | undefined, webhookSecret?: string): boolean => {
+  if (!webhookSecret) {
+    return true;
+  }
+  const token = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+  return token === webhookSecret;
 };

@@ -5,6 +5,7 @@ import { createLogger } from '@bonchik/shared';
 const run = async (): Promise<void> => {
   let queued = 0;
   let requeued = 0;
+  let firstUpdate = true;
   const healthyApp = buildApp({
     logger: createLogger('api-test'),
     adminApiKey: 'test-admin-key',
@@ -13,8 +14,16 @@ const run = async (): Promise<void> => {
       checkRedis: async () => undefined
     },
     telegram: {
+      webhookSecret: 'test-webhook-secret',
       enqueueMessage: async () => {
         queued += 1;
+      },
+      markUpdateProcessed: async () => {
+        if (firstUpdate) {
+          firstUpdate = false;
+          return true;
+        }
+        return false;
       },
       getQueueHealth: async () => ({
         main: { waiting: 1, active: 0, completed: 0, failed: 0, delayed: 0 },
@@ -37,14 +46,37 @@ const run = async (): Promise<void> => {
     method: 'POST',
     url: '/telegram/webhook',
     payload: {
+      update_id: 123,
       message: {
         text: 'hi',
         chat: { id: 1 },
         from: { id: 2, username: 'tester' }
       }
+    },
+    headers: {
+      'x-telegram-bot-api-secret-token': 'test-webhook-secret'
     }
   });
   assert.equal(webhookResponse.statusCode, 200);
+  assert.equal(queued, 1);
+
+  const duplicateWebhookResponse = await healthyApp.inject({
+    method: 'POST',
+    url: '/telegram/webhook',
+    payload: {
+      update_id: 123,
+      message: {
+        text: 'hi again',
+        chat: { id: 1 },
+        from: { id: 2, username: 'tester' }
+      }
+    },
+    headers: {
+      'x-telegram-bot-api-secret-token': 'test-webhook-secret'
+    }
+  });
+  assert.equal(duplicateWebhookResponse.statusCode, 200);
+  assert.equal(duplicateWebhookResponse.json().duplicate, true);
   assert.equal(queued, 1);
 
   const adminUnauthorized = await healthyApp.inject({
@@ -84,7 +116,9 @@ const run = async (): Promise<void> => {
       checkRedis: async () => undefined
     },
     telegram: {
+      webhookSecret: 'test-webhook-secret',
       enqueueMessage: async () => undefined,
+      markUpdateProcessed: async () => true,
       getQueueHealth: async () => ({
         main: { waiting: 0, active: 0, completed: 0, failed: 0, delayed: 0 },
         dlq: { waiting: 0, active: 0, completed: 0, failed: 0, delayed: 0 }

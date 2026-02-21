@@ -10,6 +10,7 @@ const envSchema = z.object({
   REDIS_URL: z.string().url(),
   APP_URL: z.string().url(),
   ADMIN_API_KEY: z.string().min(1).optional(),
+  TELEGRAM_WEBHOOK_SECRET: z.string().min(1).optional(),
   PORT: z.coerce.number().int().positive().default(3000),
   APP_ROLE: z.enum(['api', 'worker']).default('api')
 });
