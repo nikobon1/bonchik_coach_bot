@@ -154,9 +154,9 @@ export const renderModeInfoSummaryRu = (currentMode: CoachMode): string => {
 };
 
 export const renderModeDescriptionsRu = (): string =>
-  listCoachModes()
+  `${listCoachModes()
     .map((mode) => {
       const strategy = getCoachStrategy(mode);
       return `${strategy.labelRu} (${strategy.mode}) — ${strategy.shortDescriptionRu}`;
     })
-    .join('\n\n');
+    .join('\n\n')}\n\nВыберите наиболее подходящий вам режим.`;
