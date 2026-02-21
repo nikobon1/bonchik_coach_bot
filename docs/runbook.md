@@ -45,6 +45,17 @@ Use `scripts/ops.ps1` for routine checks:
 ./scripts/ops.ps1 -Action requeue -BaseUrl $base -AdminApiKey $admin -JobId "<jobId>"
 ```
 
+## Smoke Script
+
+Use `scripts/smoke.mjs` for automated post-deploy checks:
+
+```powershell
+$env:SMOKE_BASE_URL = $base
+$env:SMOKE_ADMIN_API_KEY = $admin
+$env:SMOKE_CHAT_ID = "216536651"
+npm run smoke
+```
+
 ## DLQ Recovery Procedure
 
 1. Confirm app health is `ok`.

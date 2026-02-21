@@ -1,0 +1,30 @@
+name: smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: Base URL to run smoke checks against
+        required: true
+        type: string
+      chat_id:
+        description: Optional chat id for reports endpoint check
+        required: false
+        type: string
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Run smoke checks
+        env:
+          SMOKE_BASE_URL: ${{ inputs.base_url }}
+          SMOKE_CHAT_ID: ${{ inputs.chat_id }}
+          SMOKE_ADMIN_API_KEY: ${{ secrets.SMOKE_ADMIN_API_KEY }}
+        run: npm run smoke

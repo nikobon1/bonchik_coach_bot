@@ -16,7 +16,8 @@
     "start:worker": "npm --workspace @bonchik/workers run start",
     "lint": "eslint . --ext .ts,.js",
     "typecheck": "tsc -b",
-    "test": "npm run build && node api/dist/selftest.js"
+    "test": "npm run build && node api/dist/selftest.js",
+    "smoke": "node scripts/smoke.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.13.8",
