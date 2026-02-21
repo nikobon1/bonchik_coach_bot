@@ -124,10 +124,23 @@ const processTelegramJob = async (
   logger: AppLogger,
   metrics: WorkerMetrics
 ): Promise<void> => {
-  if (payload.text.trim().toLowerCase().startsWith('/mode')) {
+  const normalizedText = payload.text.trim().toLowerCase();
+  if (normalizedText.startsWith('/mode')) {
+    const profile = await getOrCreateUserProfile(pool, payload.userId);
     const modeFromCommand = parseCoachModeCommand(payload.text);
+    const availableModes = listCoachModes().join(', ');
+
+    if (normalizedText === '/mode' || normalizedText === '/mode help') {
+      const current = getCoachStrategy(profile.coachMode);
+      await sendTelegramMessage({
+        botToken: telegramBotToken,
+        chatId: payload.chatId,
+        text: `Current mode: ${current.label} (${current.mode}).\nAvailable: ${availableModes}\nUse: /mode <mode>`
+      });
+      return;
+    }
+
     if (!modeFromCommand) {
-      const availableModes = listCoachModes().join(', ');
       await sendTelegramMessage({
         botToken: telegramBotToken,
         chatId: payload.chatId,

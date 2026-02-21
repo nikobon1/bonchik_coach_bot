@@ -26,6 +26,18 @@ All admin endpoints require header:
 `/mode reality_check`
 - Set CBT-pattern-focused style:
 `/mode cbt_patterns`
+- Set anti-sabotage style:
+`/mode self_sabotage`
+- Set activation style:
+`/mode behavioral_activation`
+- Set anxiety-grounding style:
+`/mode anxiety_grounding`
+- Set decision mode:
+`/mode decision_clarity`
+- Set post-failure reset mode:
+`/mode post_failure_reset`
+- Show current + available modes:
+`/mode` or `/mode help`
 
 ## Quick Commands (PowerShell)
 

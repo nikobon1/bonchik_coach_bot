@@ -1,6 +1,13 @@
 import { Pool } from 'pg';
 
-export type CoachMode = 'reality_check' | 'cbt_patterns';
+export type CoachMode =
+  | 'reality_check'
+  | 'cbt_patterns'
+  | 'self_sabotage'
+  | 'behavioral_activation'
+  | 'anxiety_grounding'
+  | 'decision_clarity'
+  | 'post_failure_reset';
 
 export type UserProfile = {
   userId: number;
