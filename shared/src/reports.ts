@@ -1,9 +1,11 @@
 import { Pool } from 'pg';
+import type { CoachMode } from './profiles';
 
 export type TelegramReportRecord = {
   chatId: number;
   userId: number;
   updateId: number;
+  coachMode: CoachMode;
   analyzerModel: string;
   reporterModel: string;
   userText: string;
@@ -16,6 +18,7 @@ export type TelegramReportView = {
   chatId: number;
   userId: number;
   updateId: number;
+  coachMode: CoachMode;
   analyzerModel: string;
   reporterModel: string;
   userText: string;
@@ -29,6 +32,7 @@ type TelegramReportRow = {
   chat_id: number;
   user_id: number;
   update_id: number;
+  coach_mode: CoachMode;
   analyzer_model: string;
   reporter_model: string;
   user_text: string;
@@ -44,17 +48,19 @@ export const appendTelegramReport = async (pool: Pool, report: TelegramReportRec
         chat_id,
         user_id,
         update_id,
+        coach_mode,
         analyzer_model,
         reporter_model,
         user_text,
         analysis,
         reply
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
     `,
     [
       report.chatId,
       report.userId,
       report.updateId,
+      report.coachMode,
       report.analyzerModel,
       report.reporterModel,
       report.userText,
@@ -76,6 +82,7 @@ export const listTelegramReportsByChat = async (
         chat_id,
         user_id,
         update_id,
+        coach_mode,
         analyzer_model,
         reporter_model,
         user_text,
@@ -95,6 +102,7 @@ export const listTelegramReportsByChat = async (
     chatId: row.chat_id,
     userId: row.user_id,
     updateId: row.update_id,
+    coachMode: row.coach_mode,
     analyzerModel: row.analyzer_model,
     reporterModel: row.reporter_model,
     userText: row.user_text,

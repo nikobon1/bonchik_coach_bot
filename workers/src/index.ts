@@ -7,11 +7,17 @@ import {
   createOpenRouterChatCompletion,
   createTelegramWorker,
   enqueueTelegramDlqJob,
+  getCoachStrategy,
+  getOrCreateUserProfile,
   getRecentChatHistory,
+  listCoachModes,
   loadConfig,
+  parseCoachModeCommand,
   runMigrations,
   sendTelegramMessage,
+  setUserCoachMode,
   type TelegramJobContext,
+  type CoachMode,
   type TelegramJobPayload
 } from '@bonchik/shared';
 
@@ -118,6 +124,25 @@ const processTelegramJob = async (
   logger: AppLogger,
   metrics: WorkerMetrics
 ): Promise<void> => {
+  if (payload.text.trim().toLowerCase().startsWith('/mode')) {
+    const modeFromCommand = parseCoachModeCommand(payload.text);
+    if (!modeFromCommand) {
+      const availableModes = listCoachModes().join(', ');
+      await sendTelegramMessage({
+        botToken: telegramBotToken,
+        chatId: payload.chatId,
+        text: `Unknown mode. Use: /mode <mode>. Available: ${availableModes}`
+      });
+      return;
+    }
+
+    await handleModeSwitchCommand(payload, pool, telegramBotToken, logger, modeFromCommand);
+    return;
+  }
+
+  const profile = await getOrCreateUserProfile(pool, payload.userId);
+  const strategy = getCoachStrategy(profile.coachMode);
+
   await appendChatMessage(pool, {
     chatId: payload.chatId,
     userId: payload.userId,
@@ -128,16 +153,19 @@ const processTelegramJob = async (
 
   const history = await getRecentChatHistory(pool, payload.chatId, 12);
   const analysis = await buildAnalysis({
+    strategyMode: strategy.mode,
     chatId: payload.chatId,
     context,
     history,
     logger,
     metrics,
     openRouterApiKey,
-    analyzerModel
+    analyzerModel,
+    analyzerSystemPrompt: strategy.analyzerSystemPrompt
   });
 
   const generatedAnswer = await buildAnswer({
+    strategyMode: strategy.mode,
     chatId: payload.chatId,
     context,
     analysis,
@@ -145,7 +173,8 @@ const processTelegramJob = async (
     logger,
     metrics,
     openRouterApiKey,
-    reporterModel
+    reporterModel,
+    reporterSystemPrompt: strategy.reporterSystemPrompt
   });
 
   const answer = clampTelegramText(generatedAnswer);
@@ -188,6 +217,7 @@ const processTelegramJob = async (
     chatId: payload.chatId,
     userId: payload.userId,
     updateId: payload.updateId,
+    coachMode: strategy.mode,
     analyzerModel,
     reporterModel,
     userText: payload.text,
@@ -197,14 +227,17 @@ const processTelegramJob = async (
 };
 
 const buildAnalysis = async ({
+  strategyMode,
   chatId,
   context,
   history,
   logger,
   metrics,
   openRouterApiKey,
-  analyzerModel
+  analyzerModel,
+  analyzerSystemPrompt
 }: {
+  strategyMode: CoachMode;
   chatId: number;
   context: TelegramJobContext;
   history: Array<{ role: 'user' | 'assistant'; content: string }>;
@@ -212,6 +245,7 @@ const buildAnalysis = async ({
   metrics: WorkerMetrics;
   openRouterApiKey: string;
   analyzerModel: string;
+  analyzerSystemPrompt: string;
 }): Promise<string> => {
   try {
     return await retryAsync(
@@ -223,8 +257,7 @@ const buildAnalysis = async ({
             messages: [
               {
                 role: 'system',
-                content:
-                  'Analyze the user message in context and return short bullet points: intent, constraints, emotional tone, recommended next step.'
+                content: analyzerSystemPrompt
               },
               ...history
             ]
@@ -241,6 +274,7 @@ const buildAnalysis = async ({
           logger.warn(
             {
               err: error,
+              strategyMode,
               chatId,
               context,
               attempt,
@@ -259,6 +293,7 @@ const buildAnalysis = async ({
 };
 
 const buildAnswer = async ({
+  strategyMode,
   chatId,
   context,
   analysis,
@@ -266,8 +301,10 @@ const buildAnswer = async ({
   logger,
   metrics,
   openRouterApiKey,
-  reporterModel
+  reporterModel,
+  reporterSystemPrompt
 }: {
+  strategyMode: CoachMode;
   chatId: number;
   context: TelegramJobContext;
   analysis: string;
@@ -276,6 +313,7 @@ const buildAnswer = async ({
   metrics: WorkerMetrics;
   openRouterApiKey: string;
   reporterModel: string;
+  reporterSystemPrompt: string;
 }): Promise<string> => {
   try {
     return await retryAsync(
@@ -287,7 +325,7 @@ const buildAnswer = async ({
             messages: [
               {
                 role: 'system',
-                content: `You are a concise Telegram coach assistant. Use short practical replies and keep continuity with recent dialog.\n\nInternal analysis:\n${analysis}`
+                content: `${reporterSystemPrompt}\n\nInternal analysis:\n${analysis}`
               },
               ...history
             ]
@@ -304,6 +342,7 @@ const buildAnswer = async ({
           logger.warn(
             {
               err: error,
+              strategyMode,
               chatId,
               context,
               attempt,
@@ -319,6 +358,34 @@ const buildAnswer = async ({
     logger.warn({ err: error, chatId, context }, 'Falling back due to OpenRouter error');
     return FALLBACK_REPLY;
   }
+};
+
+const handleModeSwitchCommand = async (
+  payload: TelegramJobPayload,
+  pool: DbPool,
+  telegramBotToken: string,
+  logger: AppLogger,
+  mode: CoachMode
+): Promise<void> => {
+  const profile = await setUserCoachMode(pool, payload.userId, mode);
+  const strategy = getCoachStrategy(profile.coachMode);
+  const response = `Mode updated: ${strategy.label} (${strategy.mode}).`;
+
+  await sendTelegramMessage({
+    botToken: telegramBotToken,
+    chatId: payload.chatId,
+    text: response
+  });
+
+  await appendChatMessage(pool, {
+    chatId: payload.chatId,
+    userId: payload.userId,
+    username: payload.username,
+    role: 'assistant',
+    content: response
+  });
+
+  logger.info({ chatId: payload.chatId, userId: payload.userId, mode: strategy.mode }, 'User coach mode updated');
 };
 
 const clampTelegramText = (text: string): string => {

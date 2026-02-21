@@ -20,6 +20,13 @@ All admin endpoints require header:
 
 `x-admin-key: <ADMIN_API_KEY>`
 
+## User Mode Commands
+
+- Set strict reality-check style:
+`/mode reality_check`
+- Set CBT-pattern-focused style:
+`/mode cbt_patterns`
+
 ## Quick Commands (PowerShell)
 
 ```powershell
