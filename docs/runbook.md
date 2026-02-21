@@ -1,37 +1,80 @@
 # Bot Coach Runbook
 
-## Health Checks
+## Required Variables
 
-- API health: `GET /health`
+- `APP_URL=https://<web-domain>.up.railway.app`
+- `ADMIN_API_KEY=<strong random secret>`
+- `TELEGRAM_WEBHOOK_SECRET=<strong random secret>`
+- `DATABASE_URL` must reference Railway Postgres `DATABASE_URL`
+- `REDIS_URL` must reference Railway Redis `REDIS_URL`
+
+## Runtime Checks
+
+- Public health: `GET /health`
 - Queue health (admin): `GET /admin/queue/health`
-- Failed jobs (admin): `GET /admin/queue/failed?limit=20`
+- Main queue failed jobs (admin): `GET /admin/queue/failed?limit=20`
 - DLQ jobs (admin): `GET /admin/queue/dlq?limit=20`
 
 All admin endpoints require header:
 
 `x-admin-key: <ADMIN_API_KEY>`
 
-## DLQ Recovery
+## Quick Commands (PowerShell)
 
-1. List DLQ jobs from `/admin/queue/dlq`.
-2. Pick a `jobId`.
-3. Requeue it with:
+```powershell
+$base = "https://<web-domain>.up.railway.app"
+$admin = "<ADMIN_API_KEY>"
 
-`POST /admin/queue/dlq/requeue/:jobId`
+(Invoke-WebRequest "$base/health").Content
+Invoke-RestMethod "$base/admin/queue/health" -Headers @{ "x-admin-key" = $admin }
+Invoke-RestMethod "$base/admin/queue/failed?limit=20" -Headers @{ "x-admin-key" = $admin }
+Invoke-RestMethod "$base/admin/queue/dlq?limit=20" -Headers @{ "x-admin-key" = $admin }
+```
 
-If the job fails again, investigate logs before another requeue attempt.
+## Ops Script
 
-## Logs
+Use `scripts/ops.ps1` for routine checks:
 
-- API logs:
-  - webhook ingress and route status
-- Worker logs:
-  - `Job started`, `Job succeeded`, `Job failed`
-  - retry logs for OpenRouter and Telegram
-  - `Worker metrics snapshot` every 60 seconds
+```powershell
+./scripts/ops.ps1 -Action health -BaseUrl $base
+./scripts/ops.ps1 -Action queue-health -BaseUrl $base -AdminApiKey $admin
+./scripts/ops.ps1 -Action dlq -BaseUrl $base -AdminApiKey $admin -Limit 20
+./scripts/ops.ps1 -Action requeue -BaseUrl $base -AdminApiKey $admin -JobId "<jobId>"
+```
 
-## Incident Notes
+## DLQ Recovery Procedure
 
-- If `/health` is `degraded`, check database and redis connectivity first.
-- If DLQ grows, inspect `errorMessage` from DLQ payload and recent worker logs.
-- If retries spike, suspect upstream instability (OpenRouter or Telegram API).
+1. Confirm app health is `ok`.
+2. Inspect worker logs for failure reason:
+`railway logs --service worker --lines 200`
+3. List DLQ jobs and choose one `jobId`.
+4. Requeue one job:
+
+```powershell
+Invoke-RestMethod `
+  -Method POST `
+  -Uri "$base/admin/queue/dlq/requeue/<jobId>" `
+  -Headers @{ "x-admin-key" = $admin }
+```
+
+5. Watch worker logs for the reprocessed job outcome.
+6. If the job fails again, stop requeueing and fix root cause first.
+
+## Alert Thresholds
+
+- `/health` returns `degraded` for more than 2 minutes.
+- Worker logs show repeated `Job failed` entries.
+- DLQ waiting count grows steadily for 10+ minutes.
+- `openRouterRetries` or `telegramRetries` spikes suddenly.
+
+## Incident Triage
+
+1. Check `web` logs:
+`railway logs --service web --lines 200`
+2. Check `worker` logs:
+`railway logs --service worker --lines 200`
+3. Check queue state:
+`GET /admin/queue/health`
+4. If DB/Redis auth or DNS errors appear, verify service variable references in Railway.
+5. Redeploy after config fix:
+`railway redeploy --service web` and `railway redeploy --service worker`
