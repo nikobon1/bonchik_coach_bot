@@ -1,12 +1,14 @@
 import {
   appendChatMessage,
   appendTelegramReport,
+  createOpenRouterTranscription,
   createDbPool,
   createTelegramDlqQueue,
   createLogger,
   createOpenRouterChatCompletion,
   createTelegramWorker,
   buildModeKeyboard,
+  downloadTelegramFileById,
   enqueueTelegramDlqJob,
   getCoachStrategy,
   getOrCreateUserProfile,
@@ -69,6 +71,7 @@ const startWorker = async (): Promise<void> => {
         context,
         pool,
         config.OPENROUTER_API_KEY,
+        config.OPENROUTER_MODEL_TRANSCRIBER,
         config.OPENROUTER_MODEL_ANALYZER,
         config.OPENROUTER_MODEL_REPORTER,
         config.TELEGRAM_BOT_TOKEN,
@@ -123,18 +126,31 @@ const processTelegramJob = async (
   context: TelegramJobContext,
   pool: DbPool,
   openRouterApiKey: string,
+  transcriberModel: string,
   analyzerModel: string,
   reporterModel: string,
   telegramBotToken: string,
   logger: AppLogger,
   metrics: WorkerMetrics
 ): Promise<void> => {
-  if (isModeMenuRequest(payload.text) || isModeInfoRequest(payload.text) || payload.text.trim().startsWith('/mode')) {
+  const userInputText = await resolveUserInputText(
+    payload,
+    telegramBotToken,
+    openRouterApiKey,
+    transcriberModel,
+    logger
+  );
+
+  if (
+    isModeMenuRequest(userInputText) ||
+    isModeInfoRequest(userInputText) ||
+    userInputText.trim().startsWith('/mode')
+  ) {
     const profile = await getOrCreateUserProfile(pool, payload.userId);
-    const modeSelection = parseCoachModeSelection(payload.text);
+    const modeSelection = parseCoachModeSelection(userInputText);
     const availableModes = listCoachModes().join(', ');
 
-    if (isModeMenuRequest(payload.text)) {
+    if (isModeMenuRequest(userInputText)) {
       await sendTelegramMessage({
         botToken: telegramBotToken,
         chatId: payload.chatId,
@@ -144,7 +160,7 @@ const processTelegramJob = async (
       return;
     }
 
-    if (isModeInfoRequest(payload.text)) {
+    if (isModeInfoRequest(userInputText)) {
       await sendTelegramMessage({
         botToken: telegramBotToken,
         chatId: payload.chatId,
@@ -176,7 +192,7 @@ const processTelegramJob = async (
     userId: payload.userId,
     username: payload.username,
     role: 'user',
-    content: payload.text
+    content: userInputText
   });
 
   const history = await getRecentChatHistory(pool, payload.chatId, 12);
@@ -248,10 +264,61 @@ const processTelegramJob = async (
     coachMode: strategy.mode,
     analyzerModel,
     reporterModel,
-    userText: payload.text,
+    userText: userInputText,
     analysis,
     reply: answer
   });
+};
+
+const resolveUserInputText = async (
+  payload: TelegramJobPayload,
+  telegramBotToken: string,
+  openRouterApiKey: string,
+  transcriberModel: string,
+  logger: AppLogger
+): Promise<string> => {
+  if (payload.text && payload.text.trim().length > 0) {
+    return payload.text;
+  }
+
+  if (!payload.media) {
+    throw new Error('Telegram payload has no text or media');
+  }
+
+  try {
+    const downloaded = await downloadTelegramFileById(telegramBotToken, payload.media.fileId);
+    const transcription = await withTimeout(
+      createOpenRouterTranscription({
+        apiKey: openRouterApiKey,
+        model: transcriberModel,
+        bytes: downloaded.bytes,
+        filename: extractFileName(downloaded.filePath),
+        mimeType: payload.media.mimeType ?? downloaded.contentType
+      }),
+      OPENROUTER_TIMEOUT_MS,
+      'OpenRouter transcription timeout'
+    );
+
+    logger.info(
+      {
+        chatId: payload.chatId,
+        userId: payload.userId,
+        mediaKind: payload.media.kind,
+        filePath: downloaded.filePath
+      },
+      'Telegram media transcribed'
+    );
+
+    return transcription;
+  } catch (error) {
+    logger.warn({ err: error, chatId: payload.chatId, userId: payload.userId }, 'Transcription failed');
+    return 'Не удалось распознать аудио. Пожалуйста, отправьте сообщение текстом или более четкое голосовое.';
+  }
+};
+
+const extractFileName = (filePath: string): string => {
+  const parts = filePath.split('/');
+  return parts[parts.length - 1] || 'audio.ogg';
 };
 
 const buildAnalysis = async ({

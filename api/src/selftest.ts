@@ -5,7 +5,7 @@ import { createLogger } from '@bonchik/shared';
 const run = async (): Promise<void> => {
   let queued = 0;
   let requeued = 0;
-  let firstUpdate = true;
+  const seenUpdates = new Set<number>();
   const healthyApp = buildApp({
     logger: createLogger('api-test'),
     adminApiKey: 'test-admin-key',
@@ -22,12 +22,12 @@ const run = async (): Promise<void> => {
       enqueueMessage: async () => {
         queued += 1;
       },
-      markUpdateProcessed: async () => {
-        if (firstUpdate) {
-          firstUpdate = false;
-          return true;
+      markUpdateProcessed: async (updateId) => {
+        if (seenUpdates.has(updateId)) {
+          return false;
         }
-        return false;
+        seenUpdates.add(updateId);
+        return true;
       },
       getQueueHealth: async () => ({
         main: { waiting: 1, active: 0, completed: 0, failed: 0, delayed: 0 },
@@ -83,6 +83,27 @@ const run = async (): Promise<void> => {
   assert.equal(duplicateWebhookResponse.statusCode, 200);
   assert.equal(duplicateWebhookResponse.json().duplicate, true);
   assert.equal(queued, 1);
+
+  const voiceWebhookResponse = await healthyApp.inject({
+    method: 'POST',
+    url: '/telegram/webhook',
+    payload: {
+      update_id: 124,
+      message: {
+        voice: {
+          file_id: 'voice-file-id',
+          mime_type: 'audio/ogg'
+        },
+        chat: { id: 1 },
+        from: { id: 2, username: 'tester' }
+      }
+    },
+    headers: {
+      'x-telegram-bot-api-secret-token': 'test-webhook-secret'
+    }
+  });
+  assert.equal(voiceWebhookResponse.statusCode, 200);
+  assert.equal(queued, 2);
 
   const adminUnauthorized = await healthyApp.inject({
     method: 'GET',

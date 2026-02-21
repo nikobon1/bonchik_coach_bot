@@ -11,6 +11,12 @@ export type TelegramWebhookInput = {
   secretToken?: string;
 };
 
+export type TelegramDownloadedFile = {
+  filePath: string;
+  bytes: ArrayBuffer;
+  contentType: string | null;
+};
+
 export const sendTelegramMessage = async ({
   botToken,
   chatId,
@@ -52,4 +58,50 @@ export const setTelegramWebhook = async ({ botToken, appUrl, secretToken }: Tele
     const body = await response.text();
     throw new Error(`Telegram setWebhook failed (${response.status}): ${body}`);
   }
+};
+
+type TelegramGetFileResponse = {
+  ok: boolean;
+  result?: {
+    file_path?: string;
+  };
+  description?: string;
+};
+
+export const downloadTelegramFileById = async (
+  botToken: string,
+  fileId: string
+): Promise<TelegramDownloadedFile> => {
+  const getFileResponse = await fetch(`https://api.telegram.org/bot${botToken}/getFile`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({
+      file_id: fileId
+    })
+  });
+
+  if (!getFileResponse.ok) {
+    const body = await getFileResponse.text();
+    throw new Error(`Telegram getFile failed (${getFileResponse.status}): ${body}`);
+  }
+
+  const getFileData = (await getFileResponse.json()) as TelegramGetFileResponse;
+  const filePath = getFileData.result?.file_path;
+  if (!getFileData.ok || !filePath) {
+    throw new Error(`Telegram getFile failed: ${getFileData.description ?? 'missing file_path'}`);
+  }
+
+  const downloadResponse = await fetch(`https://api.telegram.org/file/bot${botToken}/${filePath}`);
+  if (!downloadResponse.ok) {
+    const body = await downloadResponse.text();
+    throw new Error(`Telegram file download failed (${downloadResponse.status}): ${body}`);
+  }
+
+  return {
+    filePath,
+    bytes: await downloadResponse.arrayBuffer(),
+    contentType: downloadResponse.headers.get('content-type')
+  };
 };

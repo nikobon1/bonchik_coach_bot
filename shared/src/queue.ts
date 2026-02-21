@@ -10,7 +10,14 @@ export type TelegramJobPayload = {
   chatId: number;
   userId: number;
   username?: string;
-  text: string;
+  text?: string;
+  media?:
+    | {
+        kind: 'voice' | 'audio';
+        fileId: string;
+        mimeType?: string;
+      }
+    | undefined;
 };
 
 export type TelegramJobContext = {

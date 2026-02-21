@@ -34,14 +34,33 @@ type TelegramMessagePayload = {
   chatId: number;
   userId: number;
   username?: string;
-  text: string;
+  text?: string;
+  media?:
+    | {
+        kind: 'voice' | 'audio';
+        fileId: string;
+        mimeType?: string;
+      }
+    | undefined;
 };
 
 const telegramUpdateSchema = z.object({
   update_id: z.number().int(),
   message: z
     .object({
-      text: z.string().min(1),
+      text: z.string().min(1).optional(),
+      voice: z
+        .object({
+          file_id: z.string().min(1),
+          mime_type: z.string().optional()
+        })
+        .optional(),
+      audio: z
+        .object({
+          file_id: z.string().min(1),
+          mime_type: z.string().optional()
+        })
+        .optional(),
       chat: z.object({
         id: z.number()
       }),
@@ -104,18 +123,36 @@ export const buildApp = ({ logger, checks, telegram, adminApiKey, rateLimit }: B
     if (!parsed.success || !parsed.data.message) {
       return { ok: true, skipped: true };
     }
+    if (!parsed.data.message.text && !parsed.data.message.voice && !parsed.data.message.audio) {
+      return { ok: true, skipped: true };
+    }
 
     const isNewUpdate = await telegram.markUpdateProcessed(parsed.data.update_id);
     if (!isNewUpdate) {
       return { ok: true, duplicate: true };
     }
 
+    const media = parsed.data.message.voice
+      ? {
+          kind: 'voice' as const,
+          fileId: parsed.data.message.voice.file_id,
+          mimeType: parsed.data.message.voice.mime_type
+        }
+      : parsed.data.message.audio
+        ? {
+            kind: 'audio' as const,
+            fileId: parsed.data.message.audio.file_id,
+            mimeType: parsed.data.message.audio.mime_type
+          }
+        : undefined;
+
     await telegram.enqueueMessage({
       updateId: parsed.data.update_id,
       chatId: parsed.data.message.chat.id,
       userId: parsed.data.message.from.id,
       username: parsed.data.message.from.username,
-      text: parsed.data.message.text
+      text: parsed.data.message.text,
+      media
     });
 
     return { ok: true };
