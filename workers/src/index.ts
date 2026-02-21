@@ -1,9 +1,11 @@
 import {
   appendChatMessage,
   createDbPool,
+  createTelegramDlqQueue,
   createLogger,
   createOpenRouterChatCompletion,
   createTelegramWorker,
+  enqueueTelegramDlqJob,
   getRecentChatHistory,
   loadConfig,
   runMigrations,
@@ -27,6 +29,7 @@ type WorkerMetrics = {
   openRouterRetries: number;
   telegramRetries: number;
   fallbacks: number;
+  dlqPushed: number;
 };
 
 const OPENROUTER_TIMEOUT_MS = 20_000;
@@ -40,6 +43,7 @@ const startWorker = async (): Promise<void> => {
   const logger = createLogger('worker');
   const metrics = createInitialMetrics();
   const pool = createDbPool(config.DATABASE_URL);
+  const dlqQueue = createTelegramDlqQueue(config.REDIS_URL);
   await runMigrations(pool);
 
   const worker = createTelegramWorker(config.REDIS_URL, logger, async (payload, context) => {
@@ -62,6 +66,15 @@ const startWorker = async (): Promise<void> => {
       logger.info(correlation, 'Job succeeded');
     } catch (error) {
       metrics.failed += 1;
+      await enqueueTelegramDlqJob(dlqQueue, {
+        originalJobId: correlation.jobId,
+        originalQueue: correlation.queue,
+        attemptsMade: context.attemptsMade,
+        failedAt: new Date().toISOString(),
+        errorMessage: formatErrorMessage(error),
+        payload
+      });
+      metrics.dlqPushed += 1;
       logger.error({ err: error, ...correlation }, 'Job failed');
       throw error;
     }
@@ -77,7 +90,7 @@ const startWorker = async (): Promise<void> => {
     clearInterval(metricsInterval);
     logMetricsSnapshot(logger, metrics);
     await worker.close();
-    await pool.end();
+    await Promise.all([pool.end(), dlqQueue.close()]);
     process.exit(0);
   };
 
@@ -300,7 +313,8 @@ const createInitialMetrics = (): WorkerMetrics => ({
   failed: 0,
   openRouterRetries: 0,
   telegramRetries: 0,
-  fallbacks: 0
+  fallbacks: 0,
+  dlqPushed: 0
 });
 
 const logMetricsSnapshot = (logger: AppLogger, metrics: WorkerMetrics): void => {
@@ -312,11 +326,19 @@ const logMetricsSnapshot = (logger: AppLogger, metrics: WorkerMetrics): void => 
         failed: metrics.failed,
         openRouterRetries: metrics.openRouterRetries,
         telegramRetries: metrics.telegramRetries,
-        fallbacks: metrics.fallbacks
+        fallbacks: metrics.fallbacks,
+        dlqPushed: metrics.dlqPushed
       }
     },
     'Worker metrics snapshot'
   );
+};
+
+const formatErrorMessage = (error: unknown): string => {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return 'Unknown worker error';
 };
 
 const toCorrelation = (

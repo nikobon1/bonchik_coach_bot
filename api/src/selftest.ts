@@ -4,8 +4,10 @@ import { createLogger } from '@bonchik/shared';
 
 const run = async (): Promise<void> => {
   let queued = 0;
+  let requeued = 0;
   const healthyApp = buildApp({
     logger: createLogger('api-test'),
+    adminApiKey: 'test-admin-key',
     checks: {
       checkDb: async () => undefined,
       checkRedis: async () => undefined
@@ -13,6 +15,16 @@ const run = async (): Promise<void> => {
     telegram: {
       enqueueMessage: async () => {
         queued += 1;
+      },
+      getQueueHealth: async () => ({
+        main: { waiting: 1, active: 0, completed: 0, failed: 0, delayed: 0 },
+        dlq: { waiting: 0, active: 0, completed: 0, failed: 0, delayed: 0 }
+      }),
+      getFailedJobs: async () => [],
+      getDlqJobs: async () => [],
+      requeueDlqJob: async () => {
+        requeued += 1;
+        return true;
       }
     }
   });
@@ -35,6 +47,32 @@ const run = async (): Promise<void> => {
   assert.equal(webhookResponse.statusCode, 200);
   assert.equal(queued, 1);
 
+  const adminUnauthorized = await healthyApp.inject({
+    method: 'GET',
+    url: '/admin/queue/health'
+  });
+  assert.equal(adminUnauthorized.statusCode, 401);
+
+  const adminAuthorized = await healthyApp.inject({
+    method: 'GET',
+    url: '/admin/queue/health',
+    headers: {
+      'x-admin-key': 'test-admin-key'
+    }
+  });
+  assert.equal(adminAuthorized.statusCode, 200);
+  assert.equal(adminAuthorized.json().ok, true);
+
+  const requeueResponse = await healthyApp.inject({
+    method: 'POST',
+    url: '/admin/queue/dlq/requeue/job-1',
+    headers: {
+      'x-admin-key': 'test-admin-key'
+    }
+  });
+  assert.equal(requeueResponse.statusCode, 200);
+  assert.equal(requeued, 1);
+
   await healthyApp.close();
 
   const degradedApp = buildApp({
@@ -46,7 +84,14 @@ const run = async (): Promise<void> => {
       checkRedis: async () => undefined
     },
     telegram: {
-      enqueueMessage: async () => undefined
+      enqueueMessage: async () => undefined,
+      getQueueHealth: async () => ({
+        main: { waiting: 0, active: 0, completed: 0, failed: 0, delayed: 0 },
+        dlq: { waiting: 0, active: 0, completed: 0, failed: 0, delayed: 0 }
+      }),
+      getFailedJobs: async () => [],
+      getDlqJobs: async () => [],
+      requeueDlqJob: async () => false
     }
   });
 

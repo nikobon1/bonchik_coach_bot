@@ -9,6 +9,7 @@ const envSchema = z.object({
   DATABASE_URL: z.string().url(),
   REDIS_URL: z.string().url(),
   APP_URL: z.string().url(),
+  ADMIN_API_KEY: z.string().min(1).optional(),
   PORT: z.coerce.number().int().positive().default(3000),
   APP_ROLE: z.enum(['api', 'worker']).default('api')
 });

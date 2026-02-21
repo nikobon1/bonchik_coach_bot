@@ -3,11 +3,15 @@ import {
   checkDbHealth,
   createDbPool,
   createLogger,
+  createTelegramDlqQueue,
   createTelegramQueue,
   createRedisConnection,
   enqueueTelegramJob,
+  getQueueCounts,
+  listQueueJobs,
   loadConfig,
   pingRedis,
+  requeueDlqJob,
   runMigrations,
   setTelegramWebhook
 } from '@bonchik/shared';
@@ -19,9 +23,11 @@ export const startServer = async (): Promise<void> => {
   await runMigrations(pool);
   const redis = createRedisConnection(config.REDIS_URL);
   const queue = createTelegramQueue(config.REDIS_URL);
+  const dlqQueue = createTelegramDlqQueue(config.REDIS_URL);
 
   const app = buildApp({
     logger,
+    adminApiKey: config.ADMIN_API_KEY,
     checks: {
       checkDb: () => checkDbHealth(pool),
       checkRedis: () => pingRedis(redis)
@@ -29,12 +35,19 @@ export const startServer = async (): Promise<void> => {
     telegram: {
       enqueueMessage: async (payload) => {
         await enqueueTelegramJob(queue, payload);
-      }
+      },
+      getQueueHealth: async () => ({
+        main: await getQueueCounts(queue),
+        dlq: await getQueueCounts(dlqQueue)
+      }),
+      getFailedJobs: async (limit) => listQueueJobs(queue, 'failed', limit),
+      getDlqJobs: async (limit) => listQueueJobs(dlqQueue, 'waiting', limit),
+      requeueDlqJob: async (jobId) => requeueDlqJob(dlqQueue, queue, jobId)
     }
   });
 
   app.addHook('onClose', async () => {
-    await Promise.all([queue.close(), pool.end(), redis.quit()]);
+    await Promise.all([queue.close(), dlqQueue.close(), pool.end(), redis.quit()]);
   });
 
   try {
