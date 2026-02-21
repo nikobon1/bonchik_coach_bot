@@ -1,8 +1,12 @@
 export type OpenRouterChatInput = {
   apiKey: string;
   model: string;
-  prompt: string;
-  systemPrompt: string;
+  messages: OpenRouterChatMessage[];
+};
+
+export type OpenRouterChatMessage = {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
 };
 
 type OpenRouterChatResponse = {
@@ -16,8 +20,7 @@ type OpenRouterChatResponse = {
 export const createOpenRouterChatCompletion = async ({
   apiKey,
   model,
-  prompt,
-  systemPrompt
+  messages
 }: OpenRouterChatInput): Promise<string> => {
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
@@ -27,10 +30,7 @@ export const createOpenRouterChatCompletion = async ({
     },
     body: JSON.stringify({
       model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: prompt }
-      ]
+      messages
     })
   });
 

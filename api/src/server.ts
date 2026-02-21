@@ -8,6 +8,7 @@ import {
   enqueueTelegramJob,
   loadConfig,
   pingRedis,
+  runMigrations,
   setTelegramWebhook
 } from '@bonchik/shared';
 
@@ -15,6 +16,7 @@ export const startServer = async (): Promise<void> => {
   const config = loadConfig();
   const logger = createLogger('api');
   const pool = createDbPool(config.DATABASE_URL);
+  await runMigrations(pool);
   const redis = createRedisConnection(config.REDIS_URL);
   const queue = createTelegramQueue(config.REDIS_URL);
 

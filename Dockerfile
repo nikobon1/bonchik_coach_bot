@@ -26,5 +26,6 @@ COPY api/package.json api/package.json
 COPY workers/package.json workers/package.json
 COPY shared/package.json shared/package.json
 COPY scripts/start.mjs scripts/start.mjs
+COPY migrations migrations
 
 CMD ["node", "scripts/start.mjs"]
