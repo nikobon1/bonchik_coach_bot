@@ -1,4 +1,5 @@
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
+import { z } from 'zod';
 
 type HealthChecks = {
   checkDb: () => Promise<void>;
@@ -8,9 +9,34 @@ type HealthChecks = {
 type BuildAppOptions = {
   logger: FastifyBaseLogger;
   checks: HealthChecks;
+  telegram: {
+    enqueueMessage: (payload: TelegramMessagePayload) => Promise<void>;
+  };
 };
 
-export const buildApp = ({ logger, checks }: BuildAppOptions): FastifyInstance => {
+type TelegramMessagePayload = {
+  chatId: number;
+  userId: number;
+  username?: string;
+  text: string;
+};
+
+const telegramUpdateSchema = z.object({
+  message: z
+    .object({
+      text: z.string().min(1),
+      chat: z.object({
+        id: z.number()
+      }),
+      from: z.object({
+        id: z.number(),
+        username: z.string().optional()
+      })
+    })
+    .optional()
+});
+
+export const buildApp = ({ logger, checks, telegram }: BuildAppOptions): FastifyInstance => {
   const app = Fastify({ loggerInstance: logger });
 
   app.get('/health', async (_request, reply) => {
@@ -28,6 +54,22 @@ export const buildApp = ({ logger, checks }: BuildAppOptions): FastifyInstance =
         timestamp: new Date().toISOString()
       };
     }
+  });
+
+  app.post('/telegram/webhook', async (request) => {
+    const parsed = telegramUpdateSchema.safeParse(request.body);
+    if (!parsed.success || !parsed.data.message) {
+      return { ok: true, skipped: true };
+    }
+
+    await telegram.enqueueMessage({
+      chatId: parsed.data.message.chat.id,
+      userId: parsed.data.message.from.id,
+      username: parsed.data.message.from.username,
+      text: parsed.data.message.text
+    });
+
+    return { ok: true };
   });
 
   return app;
