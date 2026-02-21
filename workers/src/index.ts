@@ -1,5 +1,6 @@
 import {
   appendChatMessage,
+  appendTelegramReport,
   createDbPool,
   createTelegramDlqQueue,
   createLogger,
@@ -57,6 +58,7 @@ const startWorker = async (): Promise<void> => {
         context,
         pool,
         config.OPENROUTER_API_KEY,
+        config.OPENROUTER_MODEL_ANALYZER,
         config.OPENROUTER_MODEL_REPORTER,
         config.TELEGRAM_BOT_TOKEN,
         logger,
@@ -110,7 +112,8 @@ const processTelegramJob = async (
   context: TelegramJobContext,
   pool: DbPool,
   openRouterApiKey: string,
-  openRouterModel: string,
+  analyzerModel: string,
+  reporterModel: string,
   telegramBotToken: string,
   logger: AppLogger,
   metrics: WorkerMetrics
@@ -124,14 +127,25 @@ const processTelegramJob = async (
   });
 
   const history = await getRecentChatHistory(pool, payload.chatId, 12);
-  const generatedAnswer = await buildAnswer({
+  const analysis = await buildAnalysis({
     chatId: payload.chatId,
     context,
     history,
     logger,
     metrics,
     openRouterApiKey,
-    openRouterModel
+    analyzerModel
+  });
+
+  const generatedAnswer = await buildAnswer({
+    chatId: payload.chatId,
+    context,
+    analysis,
+    history,
+    logger,
+    metrics,
+    openRouterApiKey,
+    reporterModel
   });
 
   const answer = clampTelegramText(generatedAnswer);
@@ -169,16 +183,27 @@ const processTelegramJob = async (
     role: 'assistant',
     content: answer
   });
+
+  await appendTelegramReport(pool, {
+    chatId: payload.chatId,
+    userId: payload.userId,
+    updateId: payload.updateId,
+    analyzerModel,
+    reporterModel,
+    userText: payload.text,
+    analysis,
+    reply: answer
+  });
 };
 
-const buildAnswer = async ({
+const buildAnalysis = async ({
   chatId,
   context,
   history,
   logger,
   metrics,
   openRouterApiKey,
-  openRouterModel
+  analyzerModel
 }: {
   chatId: number;
   context: TelegramJobContext;
@@ -186,7 +211,7 @@ const buildAnswer = async ({
   logger: AppLogger;
   metrics: WorkerMetrics;
   openRouterApiKey: string;
-  openRouterModel: string;
+  analyzerModel: string;
 }): Promise<string> => {
   try {
     return await retryAsync(
@@ -194,12 +219,12 @@ const buildAnswer = async ({
         withTimeout(
           createOpenRouterChatCompletion({
             apiKey: openRouterApiKey,
-            model: openRouterModel,
+            model: analyzerModel,
             messages: [
               {
                 role: 'system',
                 content:
-                  'You are a concise Telegram coach assistant. Use short practical replies and keep continuity with recent dialog.'
+                  'Analyze the user message in context and return short bullet points: intent, constraints, emotional tone, recommended next step.'
               },
               ...history
             ]
@@ -221,7 +246,70 @@ const buildAnswer = async ({
               attempt,
               waitMs
             },
-            'Retrying OpenRouter request'
+            'Retrying OpenRouter analyzer request'
+          );
+        }
+      }
+    );
+  } catch (error) {
+    metrics.fallbacks += 1;
+    logger.warn({ err: error, chatId, context }, 'Falling back due to analyzer error');
+    return 'Analysis unavailable due to transient upstream issue.';
+  }
+};
+
+const buildAnswer = async ({
+  chatId,
+  context,
+  analysis,
+  history,
+  logger,
+  metrics,
+  openRouterApiKey,
+  reporterModel
+}: {
+  chatId: number;
+  context: TelegramJobContext;
+  analysis: string;
+  history: Array<{ role: 'user' | 'assistant'; content: string }>;
+  logger: AppLogger;
+  metrics: WorkerMetrics;
+  openRouterApiKey: string;
+  reporterModel: string;
+}): Promise<string> => {
+  try {
+    return await retryAsync(
+      () =>
+        withTimeout(
+          createOpenRouterChatCompletion({
+            apiKey: openRouterApiKey,
+            model: reporterModel,
+            messages: [
+              {
+                role: 'system',
+                content: `You are a concise Telegram coach assistant. Use short practical replies and keep continuity with recent dialog.\n\nInternal analysis:\n${analysis}`
+              },
+              ...history
+            ]
+          }),
+          OPENROUTER_TIMEOUT_MS,
+          'OpenRouter timeout'
+        ),
+      {
+        attempts: 3,
+        baseDelayMs: 800,
+        shouldRetry: isRetryableNetworkError,
+        onRetry: (error, attempt, waitMs) => {
+          metrics.openRouterRetries += 1;
+          logger.warn(
+            {
+              err: error,
+              chatId,
+              context,
+              attempt,
+              waitMs
+            },
+            'Retrying OpenRouter reporter request'
           );
         }
       }

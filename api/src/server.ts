@@ -10,6 +10,7 @@ import {
   enqueueTelegramJob,
   getQueueCounts,
   listQueueJobs,
+  listTelegramReportsByChat,
   loadConfig,
   markTelegramUpdateProcessed,
   pingRedis,
@@ -51,7 +52,8 @@ export const startServer = async (): Promise<void> => {
       }),
       getFailedJobs: async (limit) => listQueueJobs(queue, 'failed', limit),
       getDlqJobs: async (limit) => listQueueJobs(dlqQueue, 'waiting', limit),
-      requeueDlqJob: async (jobId) => requeueDlqJob(dlqQueue, queue, jobId)
+      requeueDlqJob: async (jobId) => requeueDlqJob(dlqQueue, queue, jobId),
+      getReportsByChat: (chatId, limit) => listTelegramReportsByChat(pool, chatId, limit)
     }
   });
 

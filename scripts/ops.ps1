@@ -1,11 +1,12 @@
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet('health', 'queue-health', 'failed', 'dlq', 'requeue')]
+  [ValidateSet('health', 'queue-health', 'failed', 'dlq', 'reports', 'requeue')]
   [string]$Action,
 
   [string]$BaseUrl,
   [string]$AdminApiKey,
   [string]$JobId,
+  [int]$ChatId,
   [int]$Limit = 20
 )
 
@@ -51,6 +52,14 @@ switch ($Action) {
   }
   'dlq' {
     Invoke-AdminGet "/admin/queue/dlq?limit=$Limit"
+    break
+  }
+  'reports' {
+    if (-not $ChatId) {
+      throw 'Chat ID is required for reports action. Pass -ChatId <id>.'
+    }
+
+    Invoke-AdminGet "/admin/reports/$ChatId?limit=$Limit"
     break
   }
   'requeue' {

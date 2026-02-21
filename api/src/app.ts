@@ -25,6 +25,7 @@ type BuildAppOptions = {
     getFailedJobs: (limit?: number) => Promise<unknown[]>;
     getDlqJobs: (limit?: number) => Promise<unknown[]>;
     requeueDlqJob: (jobId: string) => Promise<boolean>;
+    getReportsByChat: (chatId: number, limit?: number) => Promise<unknown[]>;
   };
 };
 
@@ -58,6 +59,10 @@ const adminListQuerySchema = z.object({
 
 const requeueParamsSchema = z.object({
   jobId: z.string().min(1)
+});
+
+const reportsParamsSchema = z.object({
+  chatId: z.coerce.number().int()
 });
 
 export const buildApp = ({ logger, checks, telegram, adminApiKey, rateLimit }: BuildAppOptions): FastifyInstance => {
@@ -183,6 +188,24 @@ export const buildApp = ({ logger, checks, telegram, adminApiKey, rateLimit }: B
       return { ok: false };
     }
     return { ok: true, jobId: params.jobId };
+  });
+
+  app.get('/admin/reports/:chatId', async (request, reply) => {
+    if (!(await isAdminWithinRateLimit(rateLimit, request.headers['x-forwarded-for'], request.ip))) {
+      reply.code(429);
+      return { ok: false, error: 'rate_limited' };
+    }
+    if (!isAdminAuthorized(request.headers['x-admin-key'], adminApiKey)) {
+      reply.code(401);
+      return { ok: false };
+    }
+
+    const params = reportsParamsSchema.parse(request.params);
+    const query = adminListQuerySchema.parse(request.query);
+    return {
+      ok: true,
+      reports: await telegram.getReportsByChat(params.chatId, query.limit)
+    };
   });
 
   return app;

@@ -38,7 +38,8 @@ const run = async (): Promise<void> => {
       requeueDlqJob: async () => {
         requeued += 1;
         return true;
-      }
+      },
+      getReportsByChat: async () => [{ id: 1, chatId: 1 }]
     }
   });
 
@@ -109,6 +110,17 @@ const run = async (): Promise<void> => {
   assert.equal(requeueResponse.statusCode, 200);
   assert.equal(requeued, 1);
 
+  const reportsResponse = await healthyApp.inject({
+    method: 'GET',
+    url: '/admin/reports/1?limit=10',
+    headers: {
+      'x-admin-key': 'test-admin-key'
+    }
+  });
+  assert.equal(reportsResponse.statusCode, 200);
+  assert.equal(reportsResponse.json().ok, true);
+  assert.equal(Array.isArray(reportsResponse.json().reports), true);
+
   await healthyApp.close();
 
   const rateLimitedApp = buildApp({
@@ -132,7 +144,8 @@ const run = async (): Promise<void> => {
       }),
       getFailedJobs: async () => [],
       getDlqJobs: async () => [],
-      requeueDlqJob: async () => false
+      requeueDlqJob: async () => false,
+      getReportsByChat: async () => []
     }
   });
 
@@ -174,7 +187,8 @@ const run = async (): Promise<void> => {
       }),
       getFailedJobs: async () => [],
       getDlqJobs: async () => [],
-      requeueDlqJob: async () => false
+      requeueDlqJob: async () => false,
+      getReportsByChat: async () => []
     }
   });
 

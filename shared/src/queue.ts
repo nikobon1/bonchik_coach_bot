@@ -6,6 +6,7 @@ export const TELEGRAM_DLQ_QUEUE = 'telegram-jobs-dlq';
 const MAX_LIST_LIMIT = 100;
 
 export type TelegramJobPayload = {
+  updateId: number;
   chatId: number;
   userId: number;
   username?: string;

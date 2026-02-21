@@ -7,5 +7,6 @@ export * from './openrouter';
 export * from './queue';
 export * from './rate-limit';
 export * from './redis';
+export * from './reports';
 export * from './telegram';
 export * from './updates';

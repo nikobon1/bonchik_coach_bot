@@ -14,6 +14,7 @@
 - Queue health (admin): `GET /admin/queue/health`
 - Main queue failed jobs (admin): `GET /admin/queue/failed?limit=20`
 - DLQ jobs (admin): `GET /admin/queue/dlq?limit=20`
+- Reports by chat (admin): `GET /admin/reports/:chatId?limit=20`
 
 All admin endpoints require header:
 
@@ -29,6 +30,7 @@ $admin = "<ADMIN_API_KEY>"
 Invoke-RestMethod "$base/admin/queue/health" -Headers @{ "x-admin-key" = $admin }
 Invoke-RestMethod "$base/admin/queue/failed?limit=20" -Headers @{ "x-admin-key" = $admin }
 Invoke-RestMethod "$base/admin/queue/dlq?limit=20" -Headers @{ "x-admin-key" = $admin }
+Invoke-RestMethod "$base/admin/reports/216536651?limit=20" -Headers @{ "x-admin-key" = $admin }
 ```
 
 ## Ops Script
@@ -39,6 +41,7 @@ Use `scripts/ops.ps1` for routine checks:
 ./scripts/ops.ps1 -Action health -BaseUrl $base
 ./scripts/ops.ps1 -Action queue-health -BaseUrl $base -AdminApiKey $admin
 ./scripts/ops.ps1 -Action dlq -BaseUrl $base -AdminApiKey $admin -Limit 20
+./scripts/ops.ps1 -Action reports -BaseUrl $base -AdminApiKey $admin -ChatId 216536651 -Limit 20
 ./scripts/ops.ps1 -Action requeue -BaseUrl $base -AdminApiKey $admin -JobId "<jobId>"
 ```
 
