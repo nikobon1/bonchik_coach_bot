@@ -2,6 +2,7 @@ export type TelegramSendMessageInput = {
   botToken: string;
   chatId: number;
   text: string;
+  replyMarkup?: unknown;
 };
 
 export type TelegramWebhookInput = {
@@ -10,7 +11,12 @@ export type TelegramWebhookInput = {
   secretToken?: string;
 };
 
-export const sendTelegramMessage = async ({ botToken, chatId, text }: TelegramSendMessageInput): Promise<void> => {
+export const sendTelegramMessage = async ({
+  botToken,
+  chatId,
+  text,
+  replyMarkup
+}: TelegramSendMessageInput): Promise<void> => {
   const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: 'POST',
     headers: {
@@ -18,7 +24,8 @@ export const sendTelegramMessage = async ({ botToken, chatId, text }: TelegramSe
     },
     body: JSON.stringify({
       chat_id: chatId,
-      text
+      text,
+      reply_markup: replyMarkup
     })
   });
 

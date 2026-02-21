@@ -6,13 +6,18 @@ import {
   createLogger,
   createOpenRouterChatCompletion,
   createTelegramWorker,
+  buildModeKeyboard,
   enqueueTelegramDlqJob,
   getCoachStrategy,
   getOrCreateUserProfile,
   getRecentChatHistory,
+  isModeInfoRequest,
+  isModeMenuRequest,
   listCoachModes,
   loadConfig,
-  parseCoachModeCommand,
+  parseCoachModeSelection,
+  renderModeDescriptionsRu,
+  renderModeInfoSummaryRu,
   runMigrations,
   sendTelegramMessage,
   setUserCoachMode,
@@ -124,32 +129,42 @@ const processTelegramJob = async (
   logger: AppLogger,
   metrics: WorkerMetrics
 ): Promise<void> => {
-  const normalizedText = payload.text.trim().toLowerCase();
-  if (normalizedText.startsWith('/mode')) {
+  if (isModeMenuRequest(payload.text) || isModeInfoRequest(payload.text) || payload.text.trim().startsWith('/mode')) {
     const profile = await getOrCreateUserProfile(pool, payload.userId);
-    const modeFromCommand = parseCoachModeCommand(payload.text);
+    const modeSelection = parseCoachModeSelection(payload.text);
     const availableModes = listCoachModes().join(', ');
 
-    if (normalizedText === '/mode' || normalizedText === '/mode help') {
-      const current = getCoachStrategy(profile.coachMode);
+    if (isModeMenuRequest(payload.text)) {
       await sendTelegramMessage({
         botToken: telegramBotToken,
         chatId: payload.chatId,
-        text: `Current mode: ${current.label} (${current.mode}).\nAvailable: ${availableModes}\nUse: /mode <mode>`
+        text: renderModeInfoSummaryRu(profile.coachMode),
+        replyMarkup: buildModeKeyboard()
       });
       return;
     }
 
-    if (!modeFromCommand) {
+    if (isModeInfoRequest(payload.text)) {
       await sendTelegramMessage({
         botToken: telegramBotToken,
         chatId: payload.chatId,
-        text: `Unknown mode. Use: /mode <mode>. Available: ${availableModes}`
+        text: renderModeDescriptionsRu(),
+        replyMarkup: buildModeKeyboard()
       });
       return;
     }
 
-    await handleModeSwitchCommand(payload, pool, telegramBotToken, logger, modeFromCommand);
+    if (!modeSelection) {
+      await sendTelegramMessage({
+        botToken: telegramBotToken,
+        chatId: payload.chatId,
+        text: `Неизвестный режим. Используй /mode <mode>.\nДоступно: ${availableModes}`,
+        replyMarkup: buildModeKeyboard()
+      });
+      return;
+    }
+
+    await handleModeSwitchCommand(payload, pool, telegramBotToken, logger, modeSelection);
     return;
   }
 
@@ -387,7 +402,8 @@ const handleModeSwitchCommand = async (
   await sendTelegramMessage({
     botToken: telegramBotToken,
     chatId: payload.chatId,
-    text: response
+    text: `Режим обновлен: ${strategy.labelRu} (${strategy.mode}).`,
+    replyMarkup: buildModeKeyboard()
   });
 
   await appendChatMessage(pool, {

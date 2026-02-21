@@ -38,6 +38,8 @@ All admin endpoints require header:
 `/mode post_failure_reset`
 - Show current + available modes:
 `/mode` or `/mode help`
+- Show one-line descriptions for all modes:
+`/mode info` or button `ℹ️ Режимы — кратко`
 
 ## Quick Commands (PowerShell)
 
