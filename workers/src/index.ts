@@ -11,6 +11,7 @@ import {
   downloadTelegramFileById,
   enqueueTelegramDlqJob,
   getCoachStrategy,
+  isBotAboutRequest,
   getOrCreateUserProfile,
   getRecentChatHistory,
   isModeInfoRequest,
@@ -18,6 +19,7 @@ import {
   listCoachModes,
   loadConfig,
   parseCoachModeSelection,
+  renderHowBotWorksRu,
   renderModeDescriptionsRu,
   renderModeInfoSummaryRu,
   runMigrations,
@@ -147,6 +149,7 @@ const processTelegramJob = async (
 
   if (
     isModeMenuRequest(userInputText) ||
+    isBotAboutRequest(userInputText) ||
     isModeInfoRequest(userInputText) ||
     userInputText.trim().startsWith('/mode')
   ) {
@@ -169,6 +172,16 @@ const processTelegramJob = async (
         botToken: telegramBotToken,
         chatId: payload.chatId,
         text: renderModeDescriptionsRu(),
+        replyMarkup: buildModeKeyboard()
+      });
+      return;
+    }
+
+    if (isBotAboutRequest(userInputText)) {
+      await sendTelegramMessage({
+        botToken: telegramBotToken,
+        chatId: payload.chatId,
+        text: renderHowBotWorksRu(),
         replyMarkup: buildModeKeyboard()
       });
       return;
