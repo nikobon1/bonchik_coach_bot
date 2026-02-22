@@ -11,6 +11,8 @@ import {
   getQueueCounts,
   listQueueJobs,
   listTelegramFeedbackByChat,
+  listTelegramFlowCounters,
+  listTelegramFlowDailyCounters,
   listTelegramReportsByChat,
   loadConfig,
   markTelegramUpdateProcessed,
@@ -55,7 +57,9 @@ export const startServer = async (): Promise<void> => {
       getDlqJobs: async (limit) => listQueueJobs(dlqQueue, 'waiting', limit),
       requeueDlqJob: async (jobId) => requeueDlqJob(dlqQueue, queue, jobId),
       getReportsByChat: (chatId, limit) => listTelegramReportsByChat(pool, chatId, limit),
-      getFeedbackByChat: (chatId, limit) => listTelegramFeedbackByChat(pool, chatId, limit)
+      getFeedbackByChat: (chatId, limit) => listTelegramFeedbackByChat(pool, chatId, limit),
+      getFlowCounters: () => listTelegramFlowCounters(pool),
+      getFlowDailyCounters: (days) => listTelegramFlowDailyCounters(pool, days)
     }
   });
 

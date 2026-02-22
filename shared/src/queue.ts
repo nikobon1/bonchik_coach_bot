@@ -3,6 +3,7 @@ import type pino from 'pino';
 
 export const TELEGRAM_QUEUE = 'telegram-jobs';
 export const TELEGRAM_DLQ_QUEUE = 'telegram-jobs-dlq';
+export const MORNING_SUMMARY_QUEUE = 'morning-summary-jobs';
 const MAX_LIST_LIMIT = 100;
 
 export type TelegramJobPayload = {
@@ -36,6 +37,18 @@ export type TelegramDlqJobPayload = {
 };
 
 export type TelegramJobProcessor = (payload: TelegramJobPayload, context: TelegramJobContext) => Promise<void>;
+export type MorningSummaryJobPayload = {
+  trigger: 'scheduled';
+};
+export type MorningSummaryJobContext = {
+  jobId: string;
+  queue: string;
+  attemptsMade: number;
+};
+export type MorningSummaryJobProcessor = (
+  payload: MorningSummaryJobPayload,
+  context: MorningSummaryJobContext
+) => Promise<void>;
 
 export const createTelegramQueue = (redisUrl: string) =>
   new Queue<TelegramJobPayload>(TELEGRAM_QUEUE, {
@@ -60,6 +73,20 @@ export const createTelegramDlqQueue = (redisUrl: string) =>
     }
   });
 
+export const createMorningSummaryQueue = (redisUrl: string) =>
+  new Queue<MorningSummaryJobPayload>(MORNING_SUMMARY_QUEUE, {
+    connection: { url: redisUrl },
+    defaultJobOptions: {
+      removeOnComplete: 100,
+      removeOnFail: 100,
+      attempts: 2,
+      backoff: {
+        type: 'exponential',
+        delay: 2_000
+      }
+    }
+  });
+
 export const enqueueTelegramJob = (queue: Queue<TelegramJobPayload>, payload: TelegramJobPayload) =>
   queue.add('incoming-message', payload);
 
@@ -67,6 +94,24 @@ export const enqueueTelegramDlqJob = (
   queue: Queue<TelegramDlqJobPayload>,
   payload: TelegramDlqJobPayload
 ) => queue.add('failed-message', payload);
+
+export const ensureMorningSummarySchedule = async (
+  queue: Queue<MorningSummaryJobPayload>,
+  cronPattern: string,
+  timezone: string
+): Promise<void> => {
+  await queue.add(
+    'send-morning-summary',
+    { trigger: 'scheduled' },
+    {
+      jobId: 'send-morning-summary',
+      repeat: {
+        pattern: cronPattern,
+        tz: timezone
+      }
+    }
+  );
+};
 
 export const getQueueCounts = async <T>(queue: Queue<T>) =>
   queue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed');
@@ -143,5 +188,28 @@ export const createTelegramWorker = (
     {
       connection: { url: redisUrl },
       concurrency: 10
+    }
+  );
+
+export const createMorningSummaryWorker = (
+  redisUrl: string,
+  logger: pino.Logger,
+  processor: MorningSummaryJobProcessor
+) =>
+  new Worker<MorningSummaryJobPayload>(
+    MORNING_SUMMARY_QUEUE,
+    async (job: Job<MorningSummaryJobPayload>) => {
+      const context: MorningSummaryJobContext = {
+        jobId: String(job.id ?? 'unknown'),
+        queue: MORNING_SUMMARY_QUEUE,
+        attemptsMade: job.attemptsMade
+      };
+
+      logger.info({ ...context, name: job.name }, 'Processing morning summary job');
+      await processor(job.data, context);
+    },
+    {
+      connection: { url: redisUrl },
+      concurrency: 1
     }
   );

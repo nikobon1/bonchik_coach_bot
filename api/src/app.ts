@@ -27,6 +27,8 @@ type BuildAppOptions = {
     requeueDlqJob: (jobId: string) => Promise<boolean>;
     getReportsByChat: (chatId: number, limit?: number) => Promise<unknown[]>;
     getFeedbackByChat: (chatId: number, limit?: number) => Promise<unknown[]>;
+    getFlowCounters: () => Promise<unknown[]>;
+    getFlowDailyCounters: (days?: number) => Promise<unknown[]>;
   };
 };
 
@@ -43,6 +45,29 @@ type TelegramMessagePayload = {
         mimeType?: string;
       }
     | undefined;
+};
+
+const FLOW_COUNTER_KEYS = [
+  'feedback_started',
+  'feedback_saved',
+  'feedback_cancelled',
+  'mode_recommendation_started',
+  'mode_recommendation_suggested',
+  'mode_recommendation_cancelled'
+] as const;
+
+type FlowCounterKey = (typeof FLOW_COUNTER_KEYS)[number];
+
+type FlowCounterRow = {
+  key: FlowCounterKey;
+  value: number;
+  updatedAt?: string;
+};
+
+type FlowDailyCounterRow = {
+  date: string;
+  key: FlowCounterKey;
+  value: number;
 };
 
 const telegramUpdateSchema = z.object({
@@ -83,6 +108,10 @@ const requeueParamsSchema = z.object({
 
 const reportsParamsSchema = z.object({
   chatId: z.coerce.number().int()
+});
+
+const adminAnalyticsDaysQuerySchema = z.object({
+  days: z.coerce.number().int().positive().max(90).default(14)
 });
 
 export const buildApp = ({ logger, checks, telegram, adminApiKey, rateLimit }: BuildAppOptions): FastifyInstance => {
@@ -264,6 +293,74 @@ export const buildApp = ({ logger, checks, telegram, adminApiKey, rateLimit }: B
     };
   });
 
+  app.get('/admin/analytics/telegram-flows', async (request, reply) => {
+    if (!(await isAdminWithinRateLimit(rateLimit, request.headers['x-forwarded-for'], request.ip))) {
+      reply.code(429);
+      return { ok: false, error: 'rate_limited' };
+    }
+    if (!isAdminAuthorized(request.headers['x-admin-key'], adminApiKey)) {
+      reply.code(401);
+      return { ok: false };
+    }
+
+    return {
+      ok: true,
+      counters: await telegram.getFlowCounters(),
+      timestamp: new Date().toISOString()
+    };
+  });
+
+  app.get('/admin/analytics/telegram-flows/summary', async (request, reply) => {
+    if (!(await isAdminWithinRateLimit(rateLimit, request.headers['x-forwarded-for'], request.ip))) {
+      reply.code(429);
+      return { ok: false, error: 'rate_limited' };
+    }
+    if (!isAdminAuthorized(request.headers['x-admin-key'], adminApiKey)) {
+      reply.code(401);
+      return { ok: false };
+    }
+
+    const counters = normalizeFlowCounters(await telegram.getFlowCounters());
+    const values = buildFlowCounterValueMap(counters);
+
+    return {
+      ok: true,
+      summary: {
+        feedback: buildFlowSummary(values.feedback_started, values.feedback_saved, values.feedback_cancelled),
+        modeRecommendation: buildFlowSummary(
+          values.mode_recommendation_started,
+          values.mode_recommendation_suggested,
+          values.mode_recommendation_cancelled
+        )
+      },
+      counters,
+      timestamp: new Date().toISOString()
+    };
+  });
+
+  app.get('/admin/analytics/telegram-flows/daily', async (request, reply) => {
+    if (!(await isAdminWithinRateLimit(rateLimit, request.headers['x-forwarded-for'], request.ip))) {
+      reply.code(429);
+      return { ok: false, error: 'rate_limited' };
+    }
+    if (!isAdminAuthorized(request.headers['x-admin-key'], adminApiKey)) {
+      reply.code(401);
+      return { ok: false };
+    }
+
+    const query = adminAnalyticsDaysQuerySchema.parse(request.query);
+    const rows = normalizeFlowDailyCounters(await telegram.getFlowDailyCounters(query.days));
+
+    return {
+      ok: true,
+      days: query.days,
+      timezone: 'UTC',
+      rows,
+      daily: buildFlowDailyTimeline(rows, query.days),
+      timestamp: new Date().toISOString()
+    };
+  });
+
   return app;
 };
 
@@ -300,4 +397,117 @@ const isAdminWithinRateLimit = async (
 ): Promise<boolean> => {
   const result = await rateLimit.checkAdmin(getClientKey(forwardedForHeader, fallbackIp));
   return result.allowed;
+};
+
+const normalizeFlowCounters = (rows: unknown[]): FlowCounterRow[] =>
+  rows.filter(isFlowCounterRow).map((row) => ({
+    key: row.key,
+    value: row.value,
+    updatedAt: row.updatedAt
+  }));
+
+const normalizeFlowDailyCounters = (rows: unknown[]): FlowDailyCounterRow[] =>
+  rows.filter(isFlowDailyCounterRow).map((row) => ({
+    date: row.date,
+    key: row.key,
+    value: row.value
+  }));
+
+const isFlowCounterRow = (value: unknown): value is FlowCounterRow => {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const row = value as Record<string, unknown>;
+  return (
+    typeof row.key === 'string' &&
+    FLOW_COUNTER_KEYS.includes(row.key as FlowCounterKey) &&
+    typeof row.value === 'number' &&
+    Number.isFinite(row.value)
+  );
+};
+
+const isFlowDailyCounterRow = (value: unknown): value is FlowDailyCounterRow => {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const row = value as Record<string, unknown>;
+  return (
+    typeof row.date === 'string' &&
+    /^\d{4}-\d{2}-\d{2}$/.test(row.date) &&
+    typeof row.key === 'string' &&
+    FLOW_COUNTER_KEYS.includes(row.key as FlowCounterKey) &&
+    typeof row.value === 'number' &&
+    Number.isFinite(row.value)
+  );
+};
+
+const buildFlowCounterValueMap = (counters: FlowCounterRow[]): Record<FlowCounterKey, number> => {
+  const values = Object.fromEntries(FLOW_COUNTER_KEYS.map((key) => [key, 0])) as Record<FlowCounterKey, number>;
+  for (const counter of counters) {
+    values[counter.key] = counter.value;
+  }
+  return values;
+};
+
+const buildFlowSummary = (started: number, completed: number, cancelled: number) => {
+  const dropped = Math.max(started - completed - cancelled, 0);
+  return {
+    started,
+    completed,
+    cancelled,
+    dropped,
+    completionRatePct: toRatePct(completed, started),
+    cancelRatePct: toRatePct(cancelled, started),
+    dropRatePct: toRatePct(dropped, started)
+  };
+};
+
+const buildFlowDailyTimeline = (rows: FlowDailyCounterRow[], days: number) => {
+  const entries = new Map<string, Record<FlowCounterKey, number>>();
+
+  for (const date of listRecentUtcDates(days)) {
+    entries.set(date, buildFlowCounterValueMap([]));
+  }
+
+  for (const row of rows) {
+    const current = entries.get(row.date) ?? buildFlowCounterValueMap([]);
+    current[row.key] = row.value;
+    entries.set(row.date, current);
+  }
+
+  return Array.from(entries.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, counters]) => ({
+      date,
+      counters,
+      summary: {
+        feedback: buildFlowSummary(counters.feedback_started, counters.feedback_saved, counters.feedback_cancelled),
+        modeRecommendation: buildFlowSummary(
+          counters.mode_recommendation_started,
+          counters.mode_recommendation_suggested,
+          counters.mode_recommendation_cancelled
+        )
+      }
+    }));
+};
+
+const toRatePct = (part: number, total: number): number | null => {
+  if (total <= 0) {
+    return null;
+  }
+  return Math.round((part / total) * 1000) / 10;
+};
+
+const listRecentUtcDates = (days: number): string[] => {
+  const today = new Date();
+  const result: string[] = [];
+
+  for (let offset = days - 1; offset >= 0; offset -= 1) {
+    const date = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - offset));
+    result.push(date.toISOString().slice(0, 10));
+  }
+
+  return result;
 };

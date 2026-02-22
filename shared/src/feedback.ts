@@ -18,6 +18,36 @@ export type TelegramFeedbackView = {
   createdAt: string;
 };
 
+export const TELEGRAM_FLOW_COUNTER_KEYS = [
+  'feedback_started',
+  'feedback_saved',
+  'feedback_cancelled',
+  'mode_recommendation_started',
+  'mode_recommendation_suggested',
+  'mode_recommendation_cancelled'
+] as const;
+
+export type TelegramFlowCounterKey = (typeof TELEGRAM_FLOW_COUNTER_KEYS)[number];
+
+export type TelegramFlowCounterView = {
+  key: TelegramFlowCounterKey;
+  value: number;
+  updatedAt: string;
+};
+
+export type TelegramFlowEventRecord = {
+  key: TelegramFlowCounterKey;
+  chatId: number;
+  userId: number;
+  updateId: number;
+};
+
+export type TelegramFlowDailyCounterView = {
+  date: string;
+  key: TelegramFlowCounterKey;
+  value: number;
+};
+
 type TelegramFeedbackRow = {
   id: number;
   chat_id: number;
@@ -31,6 +61,18 @@ type TelegramFeedbackRow = {
 type FeedbackStateRow = {
   awaiting_feedback: boolean;
   awaiting_mode_recommendation: boolean;
+};
+
+type TelegramFlowCounterRow = {
+  counter_key: TelegramFlowCounterKey;
+  counter_value: string;
+  updated_at: string;
+};
+
+type TelegramFlowDailyCounterRow = {
+  event_date: string;
+  counter_key: TelegramFlowCounterKey;
+  event_count: string;
 };
 
 export const appendTelegramFeedback = async (pool: Pool, feedback: TelegramFeedbackRecord): Promise<void> => {
@@ -148,4 +190,76 @@ export const isAwaitingModeRecommendationState = async (pool: Pool, userId: numb
   }
 
   return (result.rows[0] as FeedbackStateRow).awaiting_mode_recommendation;
+};
+
+export const incrementTelegramFlowCounter = async (
+  pool: Pool,
+  counterKey: TelegramFlowCounterKey
+): Promise<void> => {
+  await pool.query(
+    `
+      INSERT INTO telegram_flow_counters (counter_key, counter_value)
+      VALUES ($1, 1)
+      ON CONFLICT (counter_key)
+      DO UPDATE SET counter_value = telegram_flow_counters.counter_value + 1, updated_at = NOW()
+    `,
+    [counterKey]
+  );
+};
+
+export const appendTelegramFlowEvent = async (pool: Pool, event: TelegramFlowEventRecord): Promise<void> => {
+  await pool.query(
+    `
+      INSERT INTO telegram_flow_events (
+        counter_key,
+        chat_id,
+        user_id,
+        update_id
+      ) VALUES ($1, $2, $3, $4)
+    `,
+    [event.key, event.chatId, event.userId, event.updateId]
+  );
+};
+
+export const listTelegramFlowCounters = async (pool: Pool): Promise<TelegramFlowCounterView[]> => {
+  const result = await pool.query(
+    `
+      SELECT counter_key, counter_value, updated_at
+      FROM telegram_flow_counters
+      ORDER BY counter_key ASC
+    `
+  );
+
+  return (result.rows as TelegramFlowCounterRow[]).map((row) => ({
+    key: row.counter_key,
+    value: Number(row.counter_value),
+    updatedAt: row.updated_at
+  }));
+};
+
+export const listTelegramFlowDailyCounters = async (
+  pool: Pool,
+  days = 14
+): Promise<TelegramFlowDailyCounterView[]> => {
+  const result = await pool.query(
+    `
+      SELECT
+        ((created_at AT TIME ZONE 'UTC')::date)::text AS event_date,
+        counter_key,
+        COUNT(*)::bigint AS event_count
+      FROM telegram_flow_events
+      WHERE created_at >=
+        (date_trunc('day', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')
+        - (($1::int - 1) * INTERVAL '1 day')
+      GROUP BY ((created_at AT TIME ZONE 'UTC')::date), counter_key
+      ORDER BY event_date ASC, counter_key ASC
+    `,
+    [days]
+  );
+
+  return (result.rows as TelegramFlowDailyCounterRow[]).map((row) => ({
+    date: row.event_date,
+    key: row.counter_key,
+    value: Number(row.event_count)
+  }));
 };

@@ -1,21 +1,26 @@
 import {
   appendChatMessage,
   appendTelegramFeedback,
+  appendTelegramFlowEvent,
   appendTelegramReport,
   buildFeedbackInputKeyboard,
   buildModeRecommendationKeyboard,
   createOpenRouterTranscription,
   createDbPool,
+  createMorningSummaryQueue,
+  createMorningSummaryWorker,
   createTelegramDlqQueue,
   createLogger,
   createOpenRouterChatCompletion,
-  createTelegramWorker,
   buildMainKeyboard,
   buildModeChangeConfirmKeyboard,
   buildModeKeyboard,
+  createTelegramWorker,
   downloadTelegramFileById,
+  ensureMorningSummarySchedule,
   enqueueTelegramDlqJob,
   getCoachStrategy,
+  incrementTelegramFlowCounter,
   isAwaitingFeedbackState,
   isAwaitingModeRecommendationState,
   isBotAboutRequest,
@@ -31,8 +36,12 @@ import {
   isModeInfoRequest,
   isModeMenuRequest,
   listCoachModes,
+  hasTelegramDailySummaryForDate,
+  listTelegramReportChatsInRange,
+  listTelegramReportsByChatInRange,
   loadConfig,
   parseCoachModeSelection,
+  recordTelegramDailySummarySent,
   renderFeedbackPromptRu,
   renderHowBotWorksRu,
   renderModeRecommendationPromptRu,
@@ -43,9 +52,12 @@ import {
   setAwaitingFeedbackState,
   setAwaitingModeRecommendationState,
   setUserCoachMode,
+  type MorningSummaryJobContext,
   type TelegramJobContext,
   type CoachMode,
-  type TelegramJobPayload
+  type TelegramFlowCounterKey,
+  type TelegramJobPayload,
+  type TelegramReportView
 } from '@bonchik/shared';
 
 type DbPool = ReturnType<typeof createDbPool>;
@@ -69,12 +81,62 @@ type WorkerMetrics = {
 const OPENROUTER_TRANSCRIBER_TIMEOUT_MS = 20_000;
 const OPENROUTER_ANALYZER_TIMEOUT_MS = 35_000;
 const OPENROUTER_REPORTER_TIMEOUT_MS = 25_000;
+const OPENROUTER_DAILY_SUMMARY_TIMEOUT_MS = 30_000;
 const TELEGRAM_MESSAGE_MAX_LENGTH = 4000;
+const MORNING_SUMMARY_MAX_REPORTS_PER_CHAT = 24;
 const FALLBACK_REPLY =
   'Сейчас временно не удалось сформировать ответ. Попробуйте еще раз через 20-30 секунд.';
 const FALLBACK_REPLY_TIMEOUT =
   'Сервис сейчас отвечает слишком медленно. Я сохранил контекст, попробуйте повторить сообщение через 20-30 секунд.';
 const METRICS_SNAPSHOT_INTERVAL_MS = 60_000;
+
+type SummaryWindow = {
+  summaryDate: string;
+  fromInclusive: string;
+  toExclusive: string;
+};
+
+const recordTelegramFlowCounterSafely = async (
+  pool: DbPool,
+  logger: AppLogger,
+  counterKey: TelegramFlowCounterKey,
+  payload: Pick<TelegramJobPayload, 'chatId' | 'userId' | 'updateId'>
+): Promise<void> => {
+  try {
+    await incrementTelegramFlowCounter(pool, counterKey);
+  } catch (error) {
+    logger.warn(
+      {
+        err: error,
+        counterKey,
+        chatId: payload.chatId,
+        userId: payload.userId,
+        updateId: payload.updateId
+      },
+      'Failed to record telegram flow counter'
+    );
+  }
+
+  try {
+    await appendTelegramFlowEvent(pool, {
+      key: counterKey,
+      chatId: payload.chatId,
+      userId: payload.userId,
+      updateId: payload.updateId
+    });
+  } catch (error) {
+    logger.warn(
+      {
+        err: error,
+        counterKey,
+        chatId: payload.chatId,
+        userId: payload.userId,
+        updateId: payload.updateId
+      },
+      'Failed to record telegram flow event'
+    );
+  }
+};
 
 const startWorker = async (): Promise<void> => {
   const config = loadConfig();
@@ -82,7 +144,25 @@ const startWorker = async (): Promise<void> => {
   const metrics = createInitialMetrics();
   const pool = createDbPool(config.DATABASE_URL);
   const dlqQueue = createTelegramDlqQueue(config.REDIS_URL);
+  const morningSummaryQueue = createMorningSummaryQueue(config.REDIS_URL);
   await runMigrations(pool);
+
+  if (config.MORNING_SUMMARY_ENABLED) {
+    await ensureMorningSummarySchedule(
+      morningSummaryQueue,
+      config.MORNING_SUMMARY_CRON,
+      config.MORNING_SUMMARY_TZ
+    );
+    logger.info(
+      {
+        cron: config.MORNING_SUMMARY_CRON,
+        timezone: config.MORNING_SUMMARY_TZ
+      },
+      'Morning summary schedule ensured'
+    );
+  } else {
+    logger.info('Morning summary schedule disabled by config');
+  }
 
   const worker = createTelegramWorker(config.REDIS_URL, logger, async (payload, context) => {
     const correlation = toCorrelation(payload, context);
@@ -120,6 +200,28 @@ const startWorker = async (): Promise<void> => {
     }
   });
 
+  const morningSummaryWorker = createMorningSummaryWorker(
+    config.REDIS_URL,
+    logger,
+    async (_payload, context) => {
+      if (!config.MORNING_SUMMARY_ENABLED) {
+        logger.info({ context }, 'Skipping morning summary job because feature is disabled');
+        return;
+      }
+
+      await processMorningSummaryJob({
+        pool,
+        logger,
+        context,
+        openRouterApiKey: config.OPENROUTER_API_KEY,
+        reporterModel: config.OPENROUTER_MODEL_REPORTER,
+        telegramBotToken: config.TELEGRAM_BOT_TOKEN,
+        timezone: config.MORNING_SUMMARY_TZ,
+        metrics
+      });
+    }
+  );
+
   const metricsInterval = setInterval(() => {
     logMetricsSnapshot(logger, metrics);
   }, METRICS_SNAPSHOT_INTERVAL_MS);
@@ -129,8 +231,8 @@ const startWorker = async (): Promise<void> => {
     logger.info({ signal }, 'Shutting down worker');
     clearInterval(metricsInterval);
     logMetricsSnapshot(logger, metrics);
-    await worker.close();
-    await Promise.all([pool.end(), dlqQueue.close()]);
+    await Promise.all([worker.close(), morningSummaryWorker.close()]);
+    await Promise.all([pool.end(), dlqQueue.close(), morningSummaryQueue.close()]);
     process.exit(0);
   };
 
@@ -167,6 +269,7 @@ const processTelegramJob = async (
 
   if (isFeedbackStartRequest(userInputText)) {
     await setAwaitingFeedbackState(pool, payload.userId, true);
+    await recordTelegramFlowCounterSafely(pool, logger, 'feedback_started', payload);
     await sendTelegramMessage({
       botToken: telegramBotToken,
       chatId: payload.chatId,
@@ -179,6 +282,7 @@ const processTelegramJob = async (
   if (await isAwaitingFeedbackState(pool, payload.userId)) {
     if (isFeedbackCancelRequest(userInputText)) {
       await setAwaitingFeedbackState(pool, payload.userId, false);
+      await recordTelegramFlowCounterSafely(pool, logger, 'feedback_cancelled', payload);
       await sendTelegramMessage({
         botToken: telegramBotToken,
         chatId: payload.chatId,
@@ -207,6 +311,7 @@ const processTelegramJob = async (
       message: feedbackText
     });
     await setAwaitingFeedbackState(pool, payload.userId, false);
+    await recordTelegramFlowCounterSafely(pool, logger, 'feedback_saved', payload);
     logger.info({ chatId: payload.chatId, userId: payload.userId }, 'User feedback saved');
     await sendTelegramMessage({
       botToken: telegramBotToken,
@@ -219,6 +324,7 @@ const processTelegramJob = async (
 
   if (isModeRecommendationStartRequest(userInputText)) {
     await setAwaitingModeRecommendationState(pool, payload.userId, true);
+    await recordTelegramFlowCounterSafely(pool, logger, 'mode_recommendation_started', payload);
     await sendTelegramMessage({
       botToken: telegramBotToken,
       chatId: payload.chatId,
@@ -231,6 +337,7 @@ const processTelegramJob = async (
   if (await isAwaitingModeRecommendationState(pool, payload.userId)) {
     if (isModeRecommendationCancelRequest(userInputText)) {
       await setAwaitingModeRecommendationState(pool, payload.userId, false);
+      await recordTelegramFlowCounterSafely(pool, logger, 'mode_recommendation_cancelled', payload);
       await sendTelegramMessage({
         botToken: telegramBotToken,
         chatId: payload.chatId,
@@ -253,6 +360,7 @@ const processTelegramJob = async (
 
     const recommendation = recommendCoachMode(brief);
     await setAwaitingModeRecommendationState(pool, payload.userId, false);
+    await recordTelegramFlowCounterSafely(pool, logger, 'mode_recommendation_suggested', payload);
     await sendTelegramMessage({
       botToken: telegramBotToken,
       chatId: payload.chatId,
@@ -422,6 +530,309 @@ const processTelegramJob = async (
     analysis,
     reply: answer
   });
+};
+
+const processMorningSummaryJob = async ({
+  pool,
+  logger,
+  context,
+  openRouterApiKey,
+  reporterModel,
+  telegramBotToken,
+  timezone,
+  metrics
+}: {
+  pool: DbPool;
+  logger: AppLogger;
+  context: MorningSummaryJobContext;
+  openRouterApiKey: string;
+  reporterModel: string;
+  telegramBotToken: string;
+  timezone: string;
+  metrics: WorkerMetrics;
+}): Promise<void> => {
+  const window = await resolveMorningSummaryWindow(pool, timezone);
+  const chatRefs = await listTelegramReportChatsInRange(pool, window.fromInclusive, window.toExclusive);
+
+  logger.info(
+    {
+      context,
+      summaryDate: window.summaryDate,
+      timezone,
+      chatsCount: chatRefs.length
+    },
+    'Morning summary job started'
+  );
+
+  for (const chatRef of chatRefs) {
+    if (await hasTelegramDailySummaryForDate(pool, chatRef.chatId, window.summaryDate)) {
+      logger.info(
+        {
+          context,
+          chatId: chatRef.chatId,
+          summaryDate: window.summaryDate
+        },
+        'Morning summary already sent, skipping'
+      );
+      continue;
+    }
+
+    const reports = await listTelegramReportsByChatInRange(
+      pool,
+      chatRef.chatId,
+      window.fromInclusive,
+      window.toExclusive,
+      MORNING_SUMMARY_MAX_REPORTS_PER_CHAT
+    );
+
+    if (reports.length === 0) {
+      continue;
+    }
+
+    const summaryBody = await buildMorningSummary({
+      chatId: chatRef.chatId,
+      summaryDate: window.summaryDate,
+      timezone,
+      reports,
+      openRouterApiKey,
+      reporterModel,
+      logger,
+      context,
+      metrics
+    });
+
+    const messageText = clampTelegramText(`Summary for ${window.summaryDate}\n\n${summaryBody}`);
+
+    await retryAsync(
+      () =>
+        sendTelegramMessage({
+          botToken: telegramBotToken,
+          chatId: chatRef.chatId,
+          text: messageText
+        }),
+      {
+        attempts: 3,
+        baseDelayMs: 500,
+        shouldRetry: isRetryableNetworkError,
+        onRetry: (error, attempt, waitMs) => {
+          metrics.telegramRetries += 1;
+          logger.warn(
+            {
+              err: error,
+              context,
+              chatId: chatRef.chatId,
+              attempt,
+              waitMs
+            },
+            'Retrying morning summary Telegram send'
+          );
+        }
+      }
+    );
+
+    await appendChatMessage(pool, {
+      chatId: chatRef.chatId,
+      userId: chatRef.userId,
+      role: 'assistant',
+      content: messageText
+    });
+
+    const recorded = await recordTelegramDailySummarySent(pool, {
+      chatId: chatRef.chatId,
+      userId: chatRef.userId,
+      summaryDate: window.summaryDate,
+      timezone,
+      reportsCount: reports.length,
+      windowStartAt: window.fromInclusive,
+      windowEndAt: window.toExclusive,
+      summaryText: messageText
+    });
+
+    logger.info(
+      {
+        context,
+        chatId: chatRef.chatId,
+        userId: chatRef.userId,
+        summaryDate: window.summaryDate,
+        reportsCount: reports.length,
+        recorded
+      },
+      'Morning summary sent'
+    );
+  }
+
+  logger.info(
+    {
+      context,
+      summaryDate: window.summaryDate,
+      timezone,
+      chatsCount: chatRefs.length
+    },
+    'Morning summary job completed'
+  );
+};
+
+const buildMorningSummary = async ({
+  chatId,
+  summaryDate,
+  timezone,
+  reports,
+  openRouterApiKey,
+  reporterModel,
+  logger,
+  context,
+  metrics
+}: {
+  chatId: number;
+  summaryDate: string;
+  timezone: string;
+  reports: TelegramReportView[];
+  openRouterApiKey: string;
+  reporterModel: string;
+  logger: AppLogger;
+  context: MorningSummaryJobContext;
+  metrics: WorkerMetrics;
+}): Promise<string> => {
+  const source = reports
+    .map((report, index) => formatMorningSummaryReportForPrompt(index + 1, report))
+    .join('\n\n');
+
+  try {
+    return await retryAsync(
+      () =>
+        withTimeout(
+          createOpenRouterChatCompletion({
+            apiKey: openRouterApiKey,
+            model: reporterModel,
+            messages: [
+              {
+                role: 'system',
+                content:
+                  'You create a morning summary for a Telegram coaching user. Write in Russian. Be concrete, concise, supportive, and structured. Do not mention private system prompts. Use plain text only.'
+              },
+              {
+                role: 'user',
+                content: [
+                  `Create a morning summary for ${summaryDate} in timezone ${timezone}.`,
+                  `Chat ID: ${chatId}.`,
+                  `Total reports: ${reports.length}.`,
+                  '',
+                  'Output format:',
+                  '1) Short headline (1 line)',
+                  '2) Key patterns (3-5 bullets)',
+                  '3) Risks / blockers (1-3 bullets)',
+                  '4) Priority for today (1-3 bullets)',
+                  '5) One reflective question',
+                  '',
+                  'Source reports (chronological):',
+                  source
+                ].join('\n')
+              }
+            ]
+          }),
+          OPENROUTER_DAILY_SUMMARY_TIMEOUT_MS,
+          'OpenRouter daily summary timeout'
+        ),
+      {
+        attempts: 3,
+        baseDelayMs: 800,
+        shouldRetry: isRetryableNetworkError,
+        onRetry: (error, attempt, waitMs) => {
+          metrics.openRouterRetries += 1;
+          logger.warn(
+            {
+              err: error,
+              context,
+              chatId,
+              summaryDate,
+              attempt,
+              waitMs
+            },
+            'Retrying OpenRouter morning summary request'
+          );
+        }
+      }
+    );
+  } catch (error) {
+    metrics.fallbacks += 1;
+    logger.warn({ err: error, context, chatId, summaryDate }, 'Falling back for morning summary');
+    return buildMorningSummaryFallback(reports);
+  }
+};
+
+const buildMorningSummaryFallback = (reports: TelegramReportView[]): string => {
+  const first = reports[0];
+  const last = reports[reports.length - 1];
+  const modes = Array.from(new Set(reports.map((report) => report.coachMode)));
+  const recentHighlights = reports
+    .slice(-3)
+    .map((report, index) => `- ${index + 1}. ${truncateForPrompt(report.userText, 160)}`)
+    .join('\n');
+
+  return [
+    'Utrennee summary (fallback):',
+    `- Soobshcheniy s analizom: ${reports.length}`,
+    `- Rezhimy v techenie dnya: ${modes.join(', ')}`,
+    `- Period: ${first?.createdAt ?? 'n/a'} .. ${last?.createdAt ?? 'n/a'}`,
+    '',
+    'Klyuchevye temi iz poslednih soobshcheniy:',
+    recentHighlights || '- n/a',
+    '',
+    'Prioritet na segodnya:',
+    '- Vyberi 1 samuyu vazhnuyu zadachu i opredeli sleduyushchij konkretnyj shag.'
+  ].join('\n');
+};
+
+const formatMorningSummaryReportForPrompt = (index: number, report: TelegramReportView): string =>
+  [
+    `[${index}] createdAt=${report.createdAt} mode=${report.coachMode}`,
+    `user: ${truncateForPrompt(report.userText, 700)}`,
+    `analysis: ${truncateForPrompt(report.analysis, 700)}`,
+    `reply: ${truncateForPrompt(report.reply, 500)}`
+  ].join('\n');
+
+const truncateForPrompt = (text: string, maxLength: number): string => {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxLength - 3)}...`;
+};
+
+const resolveMorningSummaryWindow = async (pool: DbPool, timezone: string): Promise<SummaryWindow> => {
+  type SummaryWindowRow = {
+    summary_date: string;
+    from_utc: string | Date;
+    to_utc: string | Date;
+  };
+
+  const result = await pool.query(
+    `
+      SELECT
+        (((NOW() AT TIME ZONE $1)::date - 1)::text) AS summary_date,
+        ((((NOW() AT TIME ZONE $1)::date - 1)::timestamp AT TIME ZONE $1)) AS from_utc,
+        (((NOW() AT TIME ZONE $1)::date)::timestamp AT TIME ZONE $1) AS to_utc
+    `,
+    [timezone]
+  );
+
+  const row = result.rows[0] as SummaryWindowRow | undefined;
+  if (!row) {
+    throw new Error('Failed to resolve morning summary window');
+  }
+
+  return {
+    summaryDate: row.summary_date,
+    fromInclusive: toIsoTimestamp(row.from_utc),
+    toExclusive: toIsoTimestamp(row.to_utc)
+  };
+};
+
+const toIsoTimestamp = (value: string | Date): string => {
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  return new Date(value).toISOString();
 };
 
 const resolveUserInputText = async (

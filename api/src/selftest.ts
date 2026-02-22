@@ -6,6 +6,7 @@ const run = async (): Promise<void> => {
   let queued = 0;
   let requeued = 0;
   const seenUpdates = new Set<number>();
+  const todayUtc = new Date().toISOString().slice(0, 10);
   const healthyApp = buildApp({
     logger: createLogger('api-test'),
     adminApiKey: 'test-admin-key',
@@ -40,7 +41,12 @@ const run = async (): Promise<void> => {
         return true;
       },
       getReportsByChat: async () => [{ id: 1, chatId: 1 }],
-      getFeedbackByChat: async () => [{ id: 1, chatId: 1, message: 'good bot' }]
+      getFeedbackByChat: async () => [{ id: 1, chatId: 1, message: 'good bot' }],
+      getFlowCounters: async () => [{ key: 'feedback_started', value: 2, updatedAt: new Date().toISOString() }],
+      getFlowDailyCounters: async () => [
+        { date: todayUtc, key: 'feedback_started', value: 2 },
+        { date: todayUtc, key: 'feedback_saved', value: 1 }
+      ]
     }
   });
 
@@ -154,6 +160,44 @@ const run = async (): Promise<void> => {
   assert.equal(feedbackResponse.json().ok, true);
   assert.equal(Array.isArray(feedbackResponse.json().feedback), true);
 
+  const flowCountersResponse = await healthyApp.inject({
+    method: 'GET',
+    url: '/admin/analytics/telegram-flows',
+    headers: {
+      'x-admin-key': 'test-admin-key'
+    }
+  });
+  assert.equal(flowCountersResponse.statusCode, 200);
+  assert.equal(flowCountersResponse.json().ok, true);
+  assert.equal(Array.isArray(flowCountersResponse.json().counters), true);
+
+  const flowSummaryResponse = await healthyApp.inject({
+    method: 'GET',
+    url: '/admin/analytics/telegram-flows/summary',
+    headers: {
+      'x-admin-key': 'test-admin-key'
+    }
+  });
+  assert.equal(flowSummaryResponse.statusCode, 200);
+  assert.equal(flowSummaryResponse.json().ok, true);
+  assert.equal(flowSummaryResponse.json().summary.feedback.started, 2);
+  assert.equal(flowSummaryResponse.json().summary.feedback.completionRatePct, 0);
+
+  const flowDailyResponse = await healthyApp.inject({
+    method: 'GET',
+    url: '/admin/analytics/telegram-flows/daily?days=7',
+    headers: {
+      'x-admin-key': 'test-admin-key'
+    }
+  });
+  assert.equal(flowDailyResponse.statusCode, 200);
+  assert.equal(flowDailyResponse.json().ok, true);
+  assert.equal(flowDailyResponse.json().days, 7);
+  assert.equal(Array.isArray(flowDailyResponse.json().rows), true);
+  assert.equal(Array.isArray(flowDailyResponse.json().daily), true);
+  assert.equal(flowDailyResponse.json().daily.at(-1).summary.feedback.started, 2);
+  assert.equal(flowDailyResponse.json().daily.at(-1).summary.feedback.completed, 1);
+
   await healthyApp.close();
 
   const rateLimitedApp = buildApp({
@@ -179,7 +223,9 @@ const run = async (): Promise<void> => {
       getDlqJobs: async () => [],
       requeueDlqJob: async () => false,
       getReportsByChat: async () => [],
-      getFeedbackByChat: async () => []
+      getFeedbackByChat: async () => [],
+      getFlowCounters: async () => [],
+      getFlowDailyCounters: async () => []
     }
   });
 
@@ -223,7 +269,9 @@ const run = async (): Promise<void> => {
       getDlqJobs: async () => [],
       requeueDlqJob: async () => false,
       getReportsByChat: async () => [],
-      getFeedbackByChat: async () => []
+      getFeedbackByChat: async () => [],
+      getFlowCounters: async () => [],
+      getFlowDailyCounters: async () => []
     }
   });
 

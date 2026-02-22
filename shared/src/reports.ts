@@ -27,6 +27,22 @@ export type TelegramReportView = {
   createdAt: string;
 };
 
+export type TelegramReportChatRef = {
+  chatId: number;
+  userId: number;
+};
+
+export type TelegramDailySummaryRecord = {
+  chatId: number;
+  userId: number;
+  summaryDate: string;
+  timezone: string;
+  reportsCount: number;
+  windowStartAt: string;
+  windowEndAt: string;
+  summaryText: string;
+};
+
 type TelegramReportRow = {
   id: number;
   chat_id: number;
@@ -39,6 +55,11 @@ type TelegramReportRow = {
   analysis: string;
   reply: string;
   created_at: string;
+};
+
+type TelegramReportChatRefRow = {
+  chat_id: number;
+  user_id: number;
 };
 
 export const appendTelegramReport = async (pool: Pool, report: TelegramReportRecord): Promise<void> => {
@@ -68,6 +89,30 @@ export const appendTelegramReport = async (pool: Pool, report: TelegramReportRec
       report.reply
     ]
   );
+};
+
+export const listTelegramReportChatsInRange = async (
+  pool: Pool,
+  fromInclusive: string,
+  toExclusive: string
+): Promise<TelegramReportChatRef[]> => {
+  const result = await pool.query(
+    `
+      SELECT DISTINCT ON (chat_id)
+        chat_id,
+        user_id
+      FROM telegram_reports
+      WHERE created_at >= $1
+        AND created_at < $2
+      ORDER BY chat_id, created_at DESC, id DESC
+    `,
+    [fromInclusive, toExclusive]
+  );
+
+  return (result.rows as TelegramReportChatRefRow[]).map((row) => ({
+    chatId: row.chat_id,
+    userId: row.user_id
+  }));
 };
 
 export const listTelegramReportsByChat = async (
@@ -110,4 +155,104 @@ export const listTelegramReportsByChat = async (
     reply: row.reply,
     createdAt: row.created_at
   }));
+};
+
+export const listTelegramReportsByChatInRange = async (
+  pool: Pool,
+  chatId: number,
+  fromInclusive: string,
+  toExclusive: string,
+  limit = 200
+): Promise<TelegramReportView[]> => {
+  const result = await pool.query(
+    `
+      SELECT
+        id,
+        chat_id,
+        user_id,
+        update_id,
+        coach_mode,
+        analyzer_model,
+        reporter_model,
+        user_text,
+        analysis,
+        reply,
+        created_at
+      FROM telegram_reports
+      WHERE chat_id = $1
+        AND created_at >= $2
+        AND created_at < $3
+      ORDER BY created_at ASC, id ASC
+      LIMIT $4
+    `,
+    [chatId, fromInclusive, toExclusive, limit]
+  );
+
+  return (result.rows as TelegramReportRow[]).map((row) => ({
+    id: row.id,
+    chatId: row.chat_id,
+    userId: row.user_id,
+    updateId: row.update_id,
+    coachMode: row.coach_mode,
+    analyzerModel: row.analyzer_model,
+    reporterModel: row.reporter_model,
+    userText: row.user_text,
+    analysis: row.analysis,
+    reply: row.reply,
+    createdAt: row.created_at
+  }));
+};
+
+export const recordTelegramDailySummarySent = async (
+  pool: Pool,
+  summary: TelegramDailySummaryRecord
+): Promise<boolean> => {
+  const result = await pool.query(
+    `
+      INSERT INTO telegram_daily_summaries (
+        chat_id,
+        user_id,
+        summary_date,
+        timezone,
+        reports_count,
+        window_start_at,
+        window_end_at,
+        summary_text
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      ON CONFLICT (chat_id, summary_date) DO NOTHING
+      RETURNING 1
+    `,
+    [
+      summary.chatId,
+      summary.userId,
+      summary.summaryDate,
+      summary.timezone,
+      summary.reportsCount,
+      summary.windowStartAt,
+      summary.windowEndAt,
+      summary.summaryText
+    ]
+  );
+
+  return (result.rowCount ?? 0) > 0;
+};
+
+export const hasTelegramDailySummaryForDate = async (
+  pool: Pool,
+  chatId: number,
+  summaryDate: string
+): Promise<boolean> => {
+  const result = await pool.query(
+    `
+      SELECT 1
+      FROM telegram_daily_summaries
+      WHERE chat_id = $1
+        AND summary_date = $2
+      LIMIT 1
+    `,
+    [chatId, summaryDate]
+  );
+
+  return (result.rowCount ?? 0) > 0;
 };
