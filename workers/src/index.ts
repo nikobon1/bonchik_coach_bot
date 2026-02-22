@@ -3,6 +3,7 @@ import {
   appendTelegramFeedback,
   appendTelegramReport,
   buildFeedbackInputKeyboard,
+  buildModeRecommendationKeyboard,
   createOpenRouterTranscription,
   createDbPool,
   createTelegramDlqQueue,
@@ -16,6 +17,7 @@ import {
   enqueueTelegramDlqJob,
   getCoachStrategy,
   isAwaitingFeedbackState,
+  isAwaitingModeRecommendationState,
   isBotAboutRequest,
   getOrCreateUserProfile,
   getRecentChatHistory,
@@ -24,6 +26,8 @@ import {
   isModeChangeCancelRequest,
   isModeChangeConfirmRequest,
   isModeChangeRequest,
+  isModeRecommendationCancelRequest,
+  isModeRecommendationStartRequest,
   isModeInfoRequest,
   isModeMenuRequest,
   listCoachModes,
@@ -31,11 +35,13 @@ import {
   parseCoachModeSelection,
   renderFeedbackPromptRu,
   renderHowBotWorksRu,
+  renderModeRecommendationPromptRu,
   renderModeDescriptionsRu,
   renderModeInfoSummaryRu,
   runMigrations,
   sendTelegramMessage,
   setAwaitingFeedbackState,
+  setAwaitingModeRecommendationState,
   setUserCoachMode,
   type TelegramJobContext,
   type CoachMode,
@@ -207,6 +213,57 @@ const processTelegramJob = async (
       chatId: payload.chatId,
       text: 'Спасибо! Отзыв сохранен.',
       replyMarkup: buildMainKeyboard()
+    });
+    return;
+  }
+
+  if (isModeRecommendationStartRequest(userInputText)) {
+    await setAwaitingModeRecommendationState(pool, payload.userId, true);
+    await sendTelegramMessage({
+      botToken: telegramBotToken,
+      chatId: payload.chatId,
+      text: renderModeRecommendationPromptRu(),
+      replyMarkup: buildModeRecommendationKeyboard()
+    });
+    return;
+  }
+
+  if (await isAwaitingModeRecommendationState(pool, payload.userId)) {
+    if (isModeRecommendationCancelRequest(userInputText)) {
+      await setAwaitingModeRecommendationState(pool, payload.userId, false);
+      await sendTelegramMessage({
+        botToken: telegramBotToken,
+        chatId: payload.chatId,
+        text: 'Окей, отменил подбор режима.',
+        replyMarkup: buildMainKeyboard()
+      });
+      return;
+    }
+
+    const brief = userInputText.trim();
+    if (brief.length < 8) {
+      await sendTelegramMessage({
+        botToken: telegramBotToken,
+        chatId: payload.chatId,
+        text: 'Нужно чуть больше контекста. Напишите 2-3 коротких предложения.',
+        replyMarkup: buildModeRecommendationKeyboard()
+      });
+      return;
+    }
+
+    const recommendation = recommendCoachMode(brief);
+    await setAwaitingModeRecommendationState(pool, payload.userId, false);
+    await sendTelegramMessage({
+      botToken: telegramBotToken,
+      chatId: payload.chatId,
+      text: [
+        `Рекомендую начать с режима: ${recommendation.labelRu} (${recommendation.mode}).`,
+        '',
+        `Почему: ${recommendation.reason}`,
+        '',
+        'Если подходит, нажмите кнопку этого режима ниже. Если нет, выберите любой другой.'
+      ].join('\n'),
+      replyMarkup: buildModeKeyboard()
     });
     return;
   }
@@ -439,6 +496,63 @@ const extractFileName = (filePath: string): string => {
   return parts[parts.length - 1] || 'audio.ogg';
 };
 
+const recommendCoachMode = (text: string): { mode: CoachMode; labelRu: string; reason: string } => {
+  const normalized = text.toLowerCase();
+
+  const scoringRules: Array<{ mode: CoachMode; keywords: string[]; reason: string }> = [
+    {
+      mode: 'anxiety_grounding',
+      keywords: ['тревог', 'паник', 'страх', 'накруч', 'беспокой', 'ужас'],
+      reason: 'в сообщении много признаков тревожной спирали и эмоционального перегруза.'
+    },
+    {
+      mode: 'self_sabotage',
+      keywords: ['прокраст', 'отклады', 'срыва', 'сабот', 'сливаю', 'не делаю'],
+      reason: 'похоже на цикл самосаботажа: есть важные задачи, но действие постоянно блокируется.'
+    },
+    {
+      mode: 'cbt_patterns',
+      keywords: ['негатив', 'искажен', 'самокрит', 'вина', 'стыд', 'я всегда', 'я никогда'],
+      reason: 'звучат устойчивые негативные мысли и когнитивные искажения, которые лучше разбирать через CBT.'
+    },
+    {
+      mode: 'behavioral_activation',
+      keywords: ['апат', 'нет сил', 'устал', 'выгор', 'не хочу ничего', 'нет мотива'],
+      reason: 'основная проблема похожа на низкую энергию и потерю импульса к действиям.'
+    },
+    {
+      mode: 'decision_clarity',
+      keywords: ['выбор', 'решени', 'вариант', 'дилем', 'сомнева', 'не могу решить'],
+      reason: 'в фокусе именно выбор и неопределенность между вариантами.'
+    },
+    {
+      mode: 'post_failure_reset',
+      keywords: ['ошибк', 'провал', 'сорвал', 'накосячил', 'облажал', 'срыв'],
+      reason: 'контекст похож на состояние после неудачи, где нужен быстрый и бережный перезапуск.'
+    },
+    {
+      mode: 'reality_check',
+      keywords: ['факт', 'реальн', 'объектив', 'катастроф', 'преувелич', 'накрутил'],
+      reason: 'полезно сначала отделить факты от интерпретаций и снизить искажения восприятия.'
+    }
+  ];
+
+  let best = { mode: 'reality_check' as CoachMode, score: 0, reason: 'это самый универсальный стартовый режим.' };
+  for (const rule of scoringRules) {
+    const score = rule.keywords.reduce((acc, keyword) => (normalized.includes(keyword) ? acc + 1 : acc), 0);
+    if (score > best.score) {
+      best = { mode: rule.mode, score, reason: rule.reason };
+    }
+  }
+
+  const strategy = getCoachStrategy(best.mode);
+  return {
+    mode: strategy.mode,
+    labelRu: strategy.labelRu,
+    reason: best.reason
+  };
+};
+
 const buildAnalysis = async ({
   strategyMode,
   chatId,
@@ -580,6 +694,7 @@ const handleModeSwitchCommand = async (
   logger: AppLogger,
   mode: CoachMode
 ): Promise<void> => {
+  await setAwaitingModeRecommendationState(pool, payload.userId, false);
   const profile = await setUserCoachMode(pool, payload.userId, mode);
   const strategy = getCoachStrategy(profile.coachMode);
   const response = `Mode updated: ${strategy.label} (${strategy.mode}).`;

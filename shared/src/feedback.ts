@@ -30,6 +30,7 @@ type TelegramFeedbackRow = {
 
 type FeedbackStateRow = {
   awaiting_feedback: boolean;
+  awaiting_mode_recommendation: boolean;
 };
 
 export const appendTelegramFeedback = async (pool: Pool, feedback: TelegramFeedbackRecord): Promise<void> => {
@@ -113,4 +114,38 @@ export const isAwaitingFeedbackState = async (pool: Pool, userId: number): Promi
   }
 
   return (result.rows[0] as FeedbackStateRow).awaiting_feedback;
+};
+
+export const setAwaitingModeRecommendationState = async (
+  pool: Pool,
+  userId: number,
+  awaitingModeRecommendation: boolean
+): Promise<void> => {
+  await pool.query(
+    `
+      INSERT INTO user_feedback_state (user_id, awaiting_mode_recommendation)
+      VALUES ($1, $2)
+      ON CONFLICT (user_id)
+      DO UPDATE SET awaiting_mode_recommendation = EXCLUDED.awaiting_mode_recommendation, updated_at = NOW()
+    `,
+    [userId, awaitingModeRecommendation]
+  );
+};
+
+export const isAwaitingModeRecommendationState = async (pool: Pool, userId: number): Promise<boolean> => {
+  const result = await pool.query(
+    `
+      SELECT awaiting_mode_recommendation
+      FROM user_feedback_state
+      WHERE user_id = $1
+      LIMIT 1
+    `,
+    [userId]
+  );
+
+  if ((result.rowCount ?? 0) === 0) {
+    return false;
+  }
+
+  return (result.rows[0] as FeedbackStateRow).awaiting_mode_recommendation;
 };

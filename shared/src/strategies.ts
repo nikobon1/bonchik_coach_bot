@@ -143,6 +143,16 @@ export const isFeedbackCancelRequest = (text: string): boolean => {
   return normalized === '❌ отменить отзыв' || normalized === '/feedback cancel';
 };
 
+export const isModeRecommendationStartRequest = (text: string): boolean => {
+  const normalized = text.trim().toLowerCase();
+  return normalized === '🧪 подобрать режим' || normalized === '/pickmode';
+};
+
+export const isModeRecommendationCancelRequest = (text: string): boolean => {
+  const normalized = text.trim().toLowerCase();
+  return normalized === '❌ отменить подбор' || normalized === '/pickmode cancel';
+};
+
 export const parseCoachModeCommand = (text: string): CoachMode | null => {
   const normalized = text.trim().toLowerCase();
   const match = normalized.match(/^\/mode\s+([a-z_]+)$/);
@@ -191,6 +201,7 @@ export const buildMainKeyboard = (): {
     [{ text: 'ℹ️ Как работает бот' }],
     [{ text: 'ℹ️ Кратко о режимах' }],
     [{ text: '🔁 Поменять режим' }],
+    [{ text: '🧪 Подобрать режим' }],
     [{ text: '💬 Оставить обратную связь' }]
   ],
   resize_keyboard: true
@@ -212,6 +223,14 @@ export const buildFeedbackInputKeyboard = (): {
   resize_keyboard: boolean;
 } => ({
   keyboard: [[{ text: '❌ Отменить отзыв' }]],
+  resize_keyboard: true
+});
+
+export const buildModeRecommendationKeyboard = (): {
+  keyboard: Array<Array<{ text: string }>>;
+  resize_keyboard: boolean;
+} => ({
+  keyboard: [[{ text: '❌ Отменить подбор' }]],
   resize_keyboard: true
 });
 
@@ -249,4 +268,13 @@ export const renderFeedbackPromptRu = (): string =>
     'Что работает неудобно?',
     '',
     'Когда отправите сообщение, я сохраню его и подтвержу.'
+  ].join('\n');
+
+export const renderModeRecommendationPromptRu = (): string =>
+  [
+    'Напишите 2-3 предложения о том, что вас сейчас больше всего беспокоит.',
+    '',
+    'Я предложу наиболее подходящий стартовый режим и коротко объясню, почему именно он.',
+    '',
+    'Пример: "Я постоянно откладываю важные задачи и злюсь на себя. Тревожно из-за дедлайнов".'
   ].join('\n');
