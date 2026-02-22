@@ -46,10 +46,14 @@ type WorkerMetrics = {
   dlqPushed: number;
 };
 
-const OPENROUTER_TIMEOUT_MS = 20_000;
+const OPENROUTER_TRANSCRIBER_TIMEOUT_MS = 20_000;
+const OPENROUTER_ANALYZER_TIMEOUT_MS = 35_000;
+const OPENROUTER_REPORTER_TIMEOUT_MS = 25_000;
 const TELEGRAM_MESSAGE_MAX_LENGTH = 4000;
 const FALLBACK_REPLY =
-  'Sorry, I could not process that request right now. Please try again in a few seconds.';
+  'Сейчас временно не удалось сформировать ответ. Попробуйте еще раз через 20-30 секунд.';
+const FALLBACK_REPLY_TIMEOUT =
+  'Сервис сейчас отвечает слишком медленно. Я сохранил контекст, попробуйте повторить сообщение через 20-30 секунд.';
 const METRICS_SNAPSHOT_INTERVAL_MS = 60_000;
 
 const startWorker = async (): Promise<void> => {
@@ -285,6 +289,17 @@ const resolveUserInputText = async (
     throw new Error('Telegram payload has no text or media');
   }
 
+  const startedAtMs = Date.now();
+  logger.info(
+    {
+      chatId: payload.chatId,
+      userId: payload.userId,
+      mediaKind: payload.media.kind,
+      fileId: payload.media.fileId
+    },
+    'Telegram media transcription started'
+  );
+
   try {
     const downloaded = await downloadTelegramFileById(telegramBotToken, payload.media.fileId);
     const transcription = await withTimeout(
@@ -295,7 +310,7 @@ const resolveUserInputText = async (
         filename: extractFileName(downloaded.filePath),
         mimeType: payload.media.mimeType ?? downloaded.contentType
       }),
-      OPENROUTER_TIMEOUT_MS,
+      OPENROUTER_TRANSCRIBER_TIMEOUT_MS,
       'OpenRouter transcription timeout'
     );
 
@@ -304,14 +319,24 @@ const resolveUserInputText = async (
         chatId: payload.chatId,
         userId: payload.userId,
         mediaKind: payload.media.kind,
-        filePath: downloaded.filePath
+        filePath: downloaded.filePath,
+        durationMs: Date.now() - startedAtMs,
+        transcriptionChars: transcription.length
       },
       'Telegram media transcribed'
     );
 
     return transcription;
   } catch (error) {
-    logger.warn({ err: error, chatId: payload.chatId, userId: payload.userId }, 'Transcription failed');
+    logger.warn(
+      {
+        err: error,
+        chatId: payload.chatId,
+        userId: payload.userId,
+        durationMs: Date.now() - startedAtMs
+      },
+      'Transcription failed'
+    );
     return 'Не удалось распознать аудио. Пожалуйста, отправьте сообщение текстом или более четкое голосовое.';
   }
 };
@@ -357,7 +382,7 @@ const buildAnalysis = async ({
               ...history
             ]
           }),
-          OPENROUTER_TIMEOUT_MS,
+          OPENROUTER_ANALYZER_TIMEOUT_MS,
           'OpenRouter timeout'
         ),
       {
@@ -425,7 +450,7 @@ const buildAnswer = async ({
               ...history
             ]
           }),
-          OPENROUTER_TIMEOUT_MS,
+          OPENROUTER_REPORTER_TIMEOUT_MS,
           'OpenRouter timeout'
         ),
       {
@@ -451,7 +476,7 @@ const buildAnswer = async ({
   } catch (error) {
     metrics.fallbacks += 1;
     logger.warn({ err: error, chatId, context }, 'Falling back due to OpenRouter error');
-    return FALLBACK_REPLY;
+    return isTimeoutError(error) ? FALLBACK_REPLY_TIMEOUT : FALLBACK_REPLY;
   }
 };
 
@@ -556,6 +581,13 @@ const isRetryableNetworkError = (error: unknown): boolean => {
   }
 
   return /(408|409|425|429|500|502|503|504)/.test(message);
+};
+
+const isTimeoutError = (error: unknown): boolean => {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return error.message.toLowerCase().includes('timeout');
 };
 
 const createInitialMetrics = (): WorkerMetrics => ({
