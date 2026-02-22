@@ -118,6 +118,21 @@ export const isBotAboutRequest = (text: string): boolean => {
   );
 };
 
+export const isModeChangeRequest = (text: string): boolean => {
+  const normalized = text.trim().toLowerCase();
+  return normalized === '🔁 поменять режим' || normalized === '/mode change';
+};
+
+export const isModeChangeConfirmRequest = (text: string): boolean => {
+  const normalized = text.trim().toLowerCase();
+  return normalized === '✅ да, поменять' || normalized === 'да' || normalized === 'yes';
+};
+
+export const isModeChangeCancelRequest = (text: string): boolean => {
+  const normalized = text.trim().toLowerCase();
+  return normalized === '❌ нет, оставить' || normalized === 'нет' || normalized === 'no';
+};
+
 export const parseCoachModeCommand = (text: string): CoachMode | null => {
   const normalized = text.trim().toLowerCase();
   const match = normalized.match(/^\/mode\s+([a-z_]+)$/);
@@ -149,12 +164,34 @@ export const buildModeKeyboard = (): {
   resize_keyboard: boolean;
 } => ({
   keyboard: [
-    [{ text: 'ℹ️ Как работает бот' }],
-    [{ text: 'ℹ️ Кратко о режимах' }],
     [{ text: '🎯 Реальность' }, { text: '🧠 Искажения' }],
     [{ text: '🚫 Самосаботаж' }, { text: '⚡ Активация' }],
     [{ text: '🌿 Тревога' }, { text: '🧭 Решение' }],
-    [{ text: '🔁 Перезапуск' }]
+    [{ text: '🔁 Перезапуск' }],
+    [{ text: '❌ Нет, оставить' }]
+  ],
+  resize_keyboard: true
+});
+
+export const buildMainKeyboard = (): {
+  keyboard: Array<Array<{ text: string }>>;
+  resize_keyboard: boolean;
+} => ({
+  keyboard: [
+    [{ text: 'ℹ️ Как работает бот' }],
+    [{ text: 'ℹ️ Кратко о режимах' }],
+    [{ text: '🔁 Поменять режим' }]
+  ],
+  resize_keyboard: true
+});
+
+export const buildModeChangeConfirmKeyboard = (): {
+  keyboard: Array<Array<{ text: string }>>;
+  resize_keyboard: boolean;
+} => ({
+  keyboard: [
+    [{ text: '✅ Да, поменять' }],
+    [{ text: '❌ Нет, оставить' }]
   ],
   resize_keyboard: true
 });

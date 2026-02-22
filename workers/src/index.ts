@@ -7,6 +7,8 @@ import {
   createLogger,
   createOpenRouterChatCompletion,
   createTelegramWorker,
+  buildMainKeyboard,
+  buildModeChangeConfirmKeyboard,
   buildModeKeyboard,
   downloadTelegramFileById,
   enqueueTelegramDlqJob,
@@ -14,6 +16,9 @@ import {
   isBotAboutRequest,
   getOrCreateUserProfile,
   getRecentChatHistory,
+  isModeChangeCancelRequest,
+  isModeChangeConfirmRequest,
+  isModeChangeRequest,
   isModeInfoRequest,
   isModeMenuRequest,
   listCoachModes,
@@ -147,57 +152,73 @@ const processTelegramJob = async (
     logger
   );
 
-  if (
-    isModeMenuRequest(userInputText) ||
-    isBotAboutRequest(userInputText) ||
-    isModeInfoRequest(userInputText) ||
-    userInputText.trim().startsWith('/mode')
-  ) {
-    const profile = await getOrCreateUserProfile(pool, payload.userId);
-    const modeSelection = parseCoachModeSelection(userInputText);
-    const availableModes = listCoachModes().join(', ');
-
-    if (isModeMenuRequest(userInputText)) {
-      await sendTelegramMessage({
-        botToken: telegramBotToken,
-        chatId: payload.chatId,
-        text: renderModeInfoSummaryRu(profile.coachMode),
-        replyMarkup: buildModeKeyboard()
-      });
-      return;
-    }
-
-    if (isModeInfoRequest(userInputText)) {
-      await sendTelegramMessage({
-        botToken: telegramBotToken,
-        chatId: payload.chatId,
-        text: renderModeDescriptionsRu(),
-        replyMarkup: buildModeKeyboard()
-      });
-      return;
-    }
-
-    if (isBotAboutRequest(userInputText)) {
-      await sendTelegramMessage({
-        botToken: telegramBotToken,
-        chatId: payload.chatId,
-        text: renderHowBotWorksRu(),
-        replyMarkup: buildModeKeyboard()
-      });
-      return;
-    }
-
-    if (!modeSelection) {
-      await sendTelegramMessage({
-        botToken: telegramBotToken,
-        chatId: payload.chatId,
-        text: `Неизвестный режим. Используй /mode <mode>.\nДоступно: ${availableModes}`,
-        replyMarkup: buildModeKeyboard()
-      });
-      return;
-    }
-
+  const modeSelection = parseCoachModeSelection(userInputText);
+  if (modeSelection) {
     await handleModeSwitchCommand(payload, pool, telegramBotToken, logger, modeSelection);
+    return;
+  }
+
+  if (isModeChangeRequest(userInputText)) {
+    const profile = await getOrCreateUserProfile(pool, payload.userId);
+    await sendTelegramMessage({
+      botToken: telegramBotToken,
+      chatId: payload.chatId,
+      text: `${renderModeInfoSummaryRu(profile.coachMode)}\n\nВы нажали "Поменять режим". Это изменит стиль и фокус следующих ответов бота.\n\nТочно хотите открыть выбор режима?`,
+      replyMarkup: buildModeChangeConfirmKeyboard()
+    });
+    return;
+  }
+
+  if (isModeChangeConfirmRequest(userInputText) || isModeMenuRequest(userInputText)) {
+    const profile = await getOrCreateUserProfile(pool, payload.userId);
+    await sendTelegramMessage({
+      botToken: telegramBotToken,
+      chatId: payload.chatId,
+      text: `${renderModeInfoSummaryRu(profile.coachMode)}\n\nВыберите новый режим ниже:`,
+      replyMarkup: buildModeKeyboard()
+    });
+    return;
+  }
+
+  if (isModeChangeCancelRequest(userInputText)) {
+    const profile = await getOrCreateUserProfile(pool, payload.userId);
+    await sendTelegramMessage({
+      botToken: telegramBotToken,
+      chatId: payload.chatId,
+      text: `Окей, оставляем текущий режим.\n\n${renderModeInfoSummaryRu(profile.coachMode)}`,
+      replyMarkup: buildMainKeyboard()
+    });
+    return;
+  }
+
+  if (isModeInfoRequest(userInputText)) {
+    await sendTelegramMessage({
+      botToken: telegramBotToken,
+      chatId: payload.chatId,
+      text: renderModeDescriptionsRu(),
+      replyMarkup: buildMainKeyboard()
+    });
+    return;
+  }
+
+  if (isBotAboutRequest(userInputText)) {
+    await sendTelegramMessage({
+      botToken: telegramBotToken,
+      chatId: payload.chatId,
+      text: renderHowBotWorksRu(),
+      replyMarkup: buildMainKeyboard()
+    });
+    return;
+  }
+
+  if (userInputText.trim().startsWith('/mode')) {
+    const availableModes = listCoachModes().join(', ');
+    await sendTelegramMessage({
+      botToken: telegramBotToken,
+      chatId: payload.chatId,
+      text: `Неизвестный режим. Используй /mode <mode>.\nДоступно: ${availableModes}`,
+      replyMarkup: buildMainKeyboard()
+    });
     return;
   }
 
@@ -508,7 +529,7 @@ const handleModeSwitchCommand = async (
     botToken: telegramBotToken,
     chatId: payload.chatId,
     text: `Режим обновлен: ${strategy.labelRu} (${strategy.mode}).`,
-    replyMarkup: buildModeKeyboard()
+    replyMarkup: buildMainKeyboard()
   });
 
   await appendChatMessage(pool, {
