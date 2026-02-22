@@ -26,6 +26,7 @@ type BuildAppOptions = {
     getDlqJobs: (limit?: number) => Promise<unknown[]>;
     requeueDlqJob: (jobId: string) => Promise<boolean>;
     getReportsByChat: (chatId: number, limit?: number) => Promise<unknown[]>;
+    getFeedbackByChat: (chatId: number, limit?: number) => Promise<unknown[]>;
   };
 };
 
@@ -242,6 +243,24 @@ export const buildApp = ({ logger, checks, telegram, adminApiKey, rateLimit }: B
     return {
       ok: true,
       reports: await telegram.getReportsByChat(params.chatId, query.limit)
+    };
+  });
+
+  app.get('/admin/feedback/:chatId', async (request, reply) => {
+    if (!(await isAdminWithinRateLimit(rateLimit, request.headers['x-forwarded-for'], request.ip))) {
+      reply.code(429);
+      return { ok: false, error: 'rate_limited' };
+    }
+    if (!isAdminAuthorized(request.headers['x-admin-key'], adminApiKey)) {
+      reply.code(401);
+      return { ok: false };
+    }
+
+    const params = reportsParamsSchema.parse(request.params);
+    const query = adminListQuerySchema.parse(request.query);
+    return {
+      ok: true,
+      feedback: await telegram.getFeedbackByChat(params.chatId, query.limit)
     };
   });
 

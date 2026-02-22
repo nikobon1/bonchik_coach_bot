@@ -1,5 +1,6 @@
 export * from './config';
 export * from './db';
+export * from './feedback';
 export * from './history';
 export * from './logger';
 export * from './migrations';

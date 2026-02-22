@@ -1,6 +1,8 @@
 import {
   appendChatMessage,
+  appendTelegramFeedback,
   appendTelegramReport,
+  buildFeedbackInputKeyboard,
   createOpenRouterTranscription,
   createDbPool,
   createTelegramDlqQueue,
@@ -13,9 +15,12 @@ import {
   downloadTelegramFileById,
   enqueueTelegramDlqJob,
   getCoachStrategy,
+  isAwaitingFeedbackState,
   isBotAboutRequest,
   getOrCreateUserProfile,
   getRecentChatHistory,
+  isFeedbackCancelRequest,
+  isFeedbackStartRequest,
   isModeChangeCancelRequest,
   isModeChangeConfirmRequest,
   isModeChangeRequest,
@@ -24,11 +29,13 @@ import {
   listCoachModes,
   loadConfig,
   parseCoachModeSelection,
+  renderFeedbackPromptRu,
   renderHowBotWorksRu,
   renderModeDescriptionsRu,
   renderModeInfoSummaryRu,
   runMigrations,
   sendTelegramMessage,
+  setAwaitingFeedbackState,
   setUserCoachMode,
   type TelegramJobContext,
   type CoachMode,
@@ -151,6 +158,58 @@ const processTelegramJob = async (
     transcriberModel,
     logger
   );
+
+  if (isFeedbackStartRequest(userInputText)) {
+    await setAwaitingFeedbackState(pool, payload.userId, true);
+    await sendTelegramMessage({
+      botToken: telegramBotToken,
+      chatId: payload.chatId,
+      text: renderFeedbackPromptRu(),
+      replyMarkup: buildFeedbackInputKeyboard()
+    });
+    return;
+  }
+
+  if (await isAwaitingFeedbackState(pool, payload.userId)) {
+    if (isFeedbackCancelRequest(userInputText)) {
+      await setAwaitingFeedbackState(pool, payload.userId, false);
+      await sendTelegramMessage({
+        botToken: telegramBotToken,
+        chatId: payload.chatId,
+        text: 'Окей, отменил ввод отзыва.',
+        replyMarkup: buildMainKeyboard()
+      });
+      return;
+    }
+
+    const feedbackText = userInputText.trim();
+    if (!feedbackText) {
+      await sendTelegramMessage({
+        botToken: telegramBotToken,
+        chatId: payload.chatId,
+        text: 'Не вижу текста отзыва. Отправьте, пожалуйста, отзыв одним сообщением.',
+        replyMarkup: buildFeedbackInputKeyboard()
+      });
+      return;
+    }
+
+    await appendTelegramFeedback(pool, {
+      chatId: payload.chatId,
+      userId: payload.userId,
+      username: payload.username,
+      updateId: payload.updateId,
+      message: feedbackText
+    });
+    await setAwaitingFeedbackState(pool, payload.userId, false);
+    logger.info({ chatId: payload.chatId, userId: payload.userId }, 'User feedback saved');
+    await sendTelegramMessage({
+      botToken: telegramBotToken,
+      chatId: payload.chatId,
+      text: 'Спасибо! Отзыв сохранен.',
+      replyMarkup: buildMainKeyboard()
+    });
+    return;
+  }
 
   const modeSelection = parseCoachModeSelection(userInputText);
   if (modeSelection) {
