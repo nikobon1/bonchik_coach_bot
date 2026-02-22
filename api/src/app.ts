@@ -134,6 +134,11 @@ export const buildApp = ({ logger, checks, telegram, adminApiKey, rateLimit }: B
     }
   });
 
+  app.get('/admin/ui', async (_request, reply) => {
+    reply.type('text/html; charset=utf-8');
+    return renderAdminUiHtml();
+  });
+
   app.post('/telegram/webhook', async (request, reply) => {
     const webhookRate = await rateLimit.checkWebhook(getClientKey(request.headers['x-forwarded-for'], request.ip));
     if (!webhookRate.allowed) {
@@ -511,3 +516,369 @@ const listRecentUtcDates = (days: number): string[] => {
 
   return result;
 };
+
+const renderAdminUiHtml = (): string => `<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bot Coach Anna Admin</title>
+    <style>
+      :root {
+        --bg: #f7f4ee;
+        --card: #fffdf8;
+        --ink: #1f1f1b;
+        --muted: #6f6a5f;
+        --line: #ddd4c7;
+        --accent: #0f766e;
+        --accent-2: #0b5f58;
+        --warn: #8a4b08;
+        --good: #166534;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: Georgia, "Times New Roman", serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at 0% 0%, #efe8da 0%, transparent 55%),
+          radial-gradient(circle at 100% 0%, #e0efe8 0%, transparent 50%),
+          var(--bg);
+      }
+      .wrap {
+        max-width: 1080px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      .hero {
+        border: 1px solid var(--line);
+        background: linear-gradient(180deg, #fffdf9 0%, #f8f2e9 100%);
+        border-radius: 14px;
+        padding: 18px;
+        margin-bottom: 14px;
+      }
+      h1 {
+        margin: 0 0 6px 0;
+        font-size: 24px;
+      }
+      .muted { color: var(--muted); margin: 0; }
+      .controls {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 12px;
+        border: 1px solid var(--line);
+        background: var(--card);
+        border-radius: 14px;
+        padding: 14px;
+        margin-bottom: 14px;
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 120px auto auto auto;
+        gap: 10px;
+        align-items: end;
+      }
+      label {
+        display: block;
+        font-size: 12px;
+        color: var(--muted);
+        margin-bottom: 4px;
+      }
+      input, select, button {
+        width: 100%;
+        border-radius: 10px;
+        border: 1px solid var(--line);
+        padding: 10px 12px;
+        font: inherit;
+        background: #fff;
+        color: var(--ink);
+      }
+      button {
+        width: auto;
+        cursor: pointer;
+        background: var(--accent);
+        color: #fff;
+        border-color: var(--accent);
+      }
+      button.secondary {
+        background: #fff;
+        color: var(--ink);
+      }
+      button:hover { background: var(--accent-2); }
+      button.secondary:hover { background: #f7f3eb; }
+      .cards {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+        margin-bottom: 14px;
+      }
+      .card {
+        border: 1px solid var(--line);
+        background: var(--card);
+        border-radius: 14px;
+        padding: 14px;
+      }
+      .card h2 {
+        margin: 0 0 8px 0;
+        font-size: 16px;
+      }
+      .kv {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 6px 10px;
+        font-size: 14px;
+      }
+      .kv b { color: var(--muted); font-weight: 600; }
+      .status {
+        margin-top: 8px;
+        font-size: 13px;
+      }
+      .status.good { color: var(--good); }
+      .status.warn { color: var(--warn); }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+        background: #fff;
+      }
+      th, td {
+        border-bottom: 1px solid var(--line);
+        padding: 8px 6px;
+        text-align: right;
+        white-space: nowrap;
+      }
+      th:first-child, td:first-child { text-align: left; }
+      .panel {
+        border: 1px solid var(--line);
+        background: var(--card);
+        border-radius: 14px;
+        padding: 14px;
+      }
+      pre {
+        background: #fbfaf6;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 10px;
+        overflow: auto;
+        font-size: 12px;
+      }
+      @media (max-width: 880px) {
+        .row {
+          grid-template-columns: 1fr;
+          align-items: stretch;
+        }
+        .cards {
+          grid-template-columns: 1fr;
+        }
+        button { width: 100%; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <section class="hero">
+        <h1>Admin Panel: Telegram Analytics</h1>
+        <p class="muted">Сводка и история по flow "feedback" и "подбор режима" (через существующие admin API).</p>
+      </section>
+
+      <section class="controls">
+        <div class="row">
+          <div>
+            <label for="adminKey">Admin API Key</label>
+            <input id="adminKey" type="password" placeholder="Вставьте ADMIN_API_KEY" autocomplete="off" />
+          </div>
+          <div>
+            <label for="days">Days</label>
+            <input id="days" type="number" min="1" max="90" value="14" />
+          </div>
+          <button id="refreshBtn" type="button">Обновить</button>
+          <button id="saveBtn" type="button" class="secondary">Сохранить ключ</button>
+          <button id="clearBtn" type="button" class="secondary">Очистить ключ</button>
+        </div>
+        <div id="status" class="status">Готово.</div>
+      </section>
+
+      <section class="cards">
+        <article class="card">
+          <h2>Feedback</h2>
+          <div id="feedbackSummary" class="kv"></div>
+        </article>
+        <article class="card">
+          <h2>Mode Recommendation</h2>
+          <div id="modeSummary" class="kv"></div>
+        </article>
+      </section>
+
+      <section class="panel" style="margin-bottom:14px;">
+        <h2 style="margin-top:0;">Daily Timeline (UTC)</h2>
+        <div style="overflow:auto;">
+          <table id="dailyTable">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>F Start</th>
+                <th>F Done</th>
+                <th>F Cancel</th>
+                <th>F Drop</th>
+                <th>M Start</th>
+                <th>M Done</th>
+                <th>M Cancel</th>
+                <th>M Drop</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2 style="margin-top:0;">Raw API (debug)</h2>
+        <pre id="rawJson">Нажмите "Обновить"</pre>
+      </section>
+    </div>
+
+    <script>
+      const els = {
+        adminKey: document.getElementById('adminKey'),
+        days: document.getElementById('days'),
+        refreshBtn: document.getElementById('refreshBtn'),
+        saveBtn: document.getElementById('saveBtn'),
+        clearBtn: document.getElementById('clearBtn'),
+        status: document.getElementById('status'),
+        feedbackSummary: document.getElementById('feedbackSummary'),
+        modeSummary: document.getElementById('modeSummary'),
+        dailyBody: document.querySelector('#dailyTable tbody'),
+        rawJson: document.getElementById('rawJson')
+      };
+
+      const STORAGE_KEY = 'botcoach_admin_api_key';
+
+      const setStatus = (text, kind) => {
+        els.status.textContent = text;
+        els.status.className = 'status' + (kind ? ' ' + kind : '');
+      };
+
+      const getHeaders = () => {
+        const key = els.adminKey.value.trim();
+        if (!key) {
+          throw new Error('Введите ADMIN_API_KEY');
+        }
+        return { 'x-admin-key': key };
+      };
+
+      const fetchJson = async (path) => {
+        const response = await fetch(path, { headers: getHeaders() });
+        const text = await response.text();
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch {
+          throw new Error('API вернул не-JSON');
+        }
+        if (!response.ok || data.ok === false) {
+          throw new Error(data.error ? 'Ошибка API: ' + data.error : 'HTTP ' + response.status);
+        }
+        return data;
+      };
+
+      const renderKv = (container, rows) => {
+        container.innerHTML = '';
+        for (const [k, v] of rows) {
+          const keyEl = document.createElement('b');
+          keyEl.textContent = k;
+          const valEl = document.createElement('span');
+          valEl.textContent = String(v ?? '');
+          container.appendChild(keyEl);
+          container.appendChild(valEl);
+        }
+      };
+
+      const renderDailyTable = (daily) => {
+        els.dailyBody.innerHTML = '';
+        for (const row of daily || []) {
+          const tr = document.createElement('tr');
+          const f = row.summary?.feedback || {};
+          const m = row.summary?.modeRecommendation || {};
+          const cells = [
+            row.date,
+            f.started ?? 0,
+            f.completed ?? 0,
+            f.cancelled ?? 0,
+            f.dropped ?? 0,
+            m.started ?? 0,
+            m.completed ?? 0,
+            m.cancelled ?? 0,
+            m.dropped ?? 0
+          ];
+          cells.forEach((value, index) => {
+            const td = document.createElement('td');
+            td.textContent = String(value);
+            if (index === 0) td.style.textAlign = 'left';
+            tr.appendChild(td);
+          });
+          els.dailyBody.appendChild(tr);
+        }
+      };
+
+      const refresh = async () => {
+        const days = Math.min(90, Math.max(1, Number(els.days.value || '14')));
+        els.days.value = String(days);
+        setStatus('Загружаю...', 'warn');
+        try {
+          const [summary, daily, raw] = await Promise.all([
+            fetchJson('/admin/analytics/telegram-flows/summary'),
+            fetchJson('/admin/analytics/telegram-flows/daily?days=' + encodeURIComponent(String(days))),
+            fetchJson('/admin/analytics/telegram-flows')
+          ]);
+
+          renderKv(els.feedbackSummary, [
+            ['started', summary.summary.feedback.started],
+            ['completed', summary.summary.feedback.completed],
+            ['cancelled', summary.summary.feedback.cancelled],
+            ['dropped', summary.summary.feedback.dropped],
+            ['completionRatePct', summary.summary.feedback.completionRatePct],
+            ['cancelRatePct', summary.summary.feedback.cancelRatePct],
+            ['dropRatePct', summary.summary.feedback.dropRatePct]
+          ]);
+
+          renderKv(els.modeSummary, [
+            ['started', summary.summary.modeRecommendation.started],
+            ['completed', summary.summary.modeRecommendation.completed],
+            ['cancelled', summary.summary.modeRecommendation.cancelled],
+            ['dropped', summary.summary.modeRecommendation.dropped],
+            ['completionRatePct', summary.summary.modeRecommendation.completionRatePct],
+            ['cancelRatePct', summary.summary.modeRecommendation.cancelRatePct],
+            ['dropRatePct', summary.summary.modeRecommendation.dropRatePct]
+          ]);
+
+          renderDailyTable(daily.daily);
+          els.rawJson.textContent = JSON.stringify({ summary, daily, raw }, null, 2);
+          setStatus('Данные обновлены.', 'good');
+        } catch (error) {
+          setStatus(error instanceof Error ? error.message : 'Ошибка загрузки', 'warn');
+        }
+      };
+
+      els.saveBtn.addEventListener('click', () => {
+        localStorage.setItem(STORAGE_KEY, els.adminKey.value);
+        setStatus('Ключ сохранен в localStorage этого браузера.', 'good');
+      });
+
+      els.clearBtn.addEventListener('click', () => {
+        localStorage.removeItem(STORAGE_KEY);
+        els.adminKey.value = '';
+        setStatus('Ключ удален из localStorage.', 'good');
+      });
+
+      els.refreshBtn.addEventListener('click', () => {
+        void refresh();
+      });
+
+      const savedKey = localStorage.getItem(STORAGE_KEY);
+      if (savedKey) {
+        els.adminKey.value = savedKey;
+        setStatus('Ключ подгружен из localStorage. Нажмите "Обновить".', 'good');
+      }
+    </script>
+  </body>
+</html>`;

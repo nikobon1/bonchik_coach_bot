@@ -54,6 +54,11 @@ const run = async (): Promise<void> => {
   assert.equal(healthyResponse.statusCode, 200);
   assert.equal(healthyResponse.json().status, 'ok');
 
+  const adminUiResponse = await healthyApp.inject({ method: 'GET', url: '/admin/ui' });
+  assert.equal(adminUiResponse.statusCode, 200);
+  assert.equal(adminUiResponse.headers['content-type']?.includes('text/html'), true);
+  assert.equal(adminUiResponse.body.includes('Admin Panel: Telegram Analytics'), true);
+
   const webhookResponse = await healthyApp.inject({
     method: 'POST',
     url: '/telegram/webhook',
