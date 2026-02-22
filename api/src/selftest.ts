@@ -59,6 +59,36 @@ const run = async (): Promise<void> => {
   assert.equal(adminUiResponse.headers['content-type']?.includes('text/html'), true);
   assert.equal(adminUiResponse.body.includes('Admin Panel: Telegram Analytics'), true);
 
+  const uiSessionBeforeLogin = await healthyApp.inject({ method: 'GET', url: '/admin/ui/session' });
+  assert.equal(uiSessionBeforeLogin.statusCode, 200);
+  assert.equal(uiSessionBeforeLogin.json().authenticated, false);
+
+  const uiLoginResponse = await healthyApp.inject({
+    method: 'POST',
+    url: '/admin/ui/login',
+    payload: { adminApiKey: 'test-admin-key' }
+  });
+  assert.equal(uiLoginResponse.statusCode, 200);
+  assert.equal(uiLoginResponse.json().ok, true);
+  const uiCookieHeader = uiLoginResponse.headers['set-cookie'];
+  assert.equal(typeof uiCookieHeader, 'string');
+
+  const uiSessionAfterLogin = await healthyApp.inject({
+    method: 'GET',
+    url: '/admin/ui/session',
+    headers: { cookie: uiCookieHeader as string }
+  });
+  assert.equal(uiSessionAfterLogin.statusCode, 200);
+  assert.equal(uiSessionAfterLogin.json().authenticated, true);
+
+  const uiSummaryResponse = await healthyApp.inject({
+    method: 'GET',
+    url: '/admin/ui/api/analytics/telegram-flows/summary',
+    headers: { cookie: uiCookieHeader as string }
+  });
+  assert.equal(uiSummaryResponse.statusCode, 200);
+  assert.equal(uiSummaryResponse.json().ok, true);
+
   const webhookResponse = await healthyApp.inject({
     method: 'POST',
     url: '/telegram/webhook',

@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
@@ -114,6 +115,13 @@ const adminAnalyticsDaysQuerySchema = z.object({
   days: z.coerce.number().int().positive().max(90).default(14)
 });
 
+const adminUiLoginSchema = z.object({
+  adminApiKey: z.string().min(1)
+});
+
+const ADMIN_UI_SESSION_COOKIE = 'admin_ui_session';
+const ADMIN_UI_SESSION_TTL_SEC = 60 * 60 * 24 * 30;
+
 export const buildApp = ({ logger, checks, telegram, adminApiKey, rateLimit }: BuildAppOptions): FastifyInstance => {
   const app = Fastify({ loggerInstance: logger });
 
@@ -137,6 +145,112 @@ export const buildApp = ({ logger, checks, telegram, adminApiKey, rateLimit }: B
   app.get('/admin/ui', async (_request, reply) => {
     reply.type('text/html; charset=utf-8');
     return renderAdminUiHtml();
+  });
+
+  app.get('/admin/ui/session', async (request, reply) => {
+    if (!(await isAdminWithinRateLimit(rateLimit, request.headers['x-forwarded-for'], request.ip))) {
+      reply.code(429);
+      return { ok: false, error: 'rate_limited' };
+    }
+
+    return {
+      ok: true,
+      authenticated: isAdminUiSessionAuthorized(request.headers.cookie, adminApiKey)
+    };
+  });
+
+  app.post('/admin/ui/login', async (request, reply) => {
+    if (!(await isAdminWithinRateLimit(rateLimit, request.headers['x-forwarded-for'], request.ip))) {
+      reply.code(429);
+      return { ok: false, error: 'rate_limited' };
+    }
+
+    const body = adminUiLoginSchema.parse(request.body);
+    if (!isAdminTokenAuthorized(body.adminApiKey, adminApiKey)) {
+      reply.code(401);
+      return { ok: false };
+    }
+
+    reply.header('Set-Cookie', createAdminUiSessionCookie(adminApiKey));
+    return { ok: true };
+  });
+
+  app.post('/admin/ui/logout', async (request, reply) => {
+    if (!(await isAdminWithinRateLimit(rateLimit, request.headers['x-forwarded-for'], request.ip))) {
+      reply.code(429);
+      return { ok: false, error: 'rate_limited' };
+    }
+
+    reply.header('Set-Cookie', clearAdminUiSessionCookie());
+    return { ok: true };
+  });
+
+  app.get('/admin/ui/api/analytics/telegram-flows', async (request, reply) => {
+    if (!(await isAdminWithinRateLimit(rateLimit, request.headers['x-forwarded-for'], request.ip))) {
+      reply.code(429);
+      return { ok: false, error: 'rate_limited' };
+    }
+    if (!isAdminUiSessionAuthorized(request.headers.cookie, adminApiKey)) {
+      reply.code(401);
+      return { ok: false };
+    }
+
+    return {
+      ok: true,
+      counters: await telegram.getFlowCounters(),
+      timestamp: new Date().toISOString()
+    };
+  });
+
+  app.get('/admin/ui/api/analytics/telegram-flows/summary', async (request, reply) => {
+    if (!(await isAdminWithinRateLimit(rateLimit, request.headers['x-forwarded-for'], request.ip))) {
+      reply.code(429);
+      return { ok: false, error: 'rate_limited' };
+    }
+    if (!isAdminUiSessionAuthorized(request.headers.cookie, adminApiKey)) {
+      reply.code(401);
+      return { ok: false };
+    }
+
+    const counters = normalizeFlowCounters(await telegram.getFlowCounters());
+    const values = buildFlowCounterValueMap(counters);
+
+    return {
+      ok: true,
+      summary: {
+        feedback: buildFlowSummary(values.feedback_started, values.feedback_saved, values.feedback_cancelled),
+        modeRecommendation: buildFlowSummary(
+          values.mode_recommendation_started,
+          values.mode_recommendation_suggested,
+          values.mode_recommendation_cancelled
+        )
+      },
+      counters,
+      timestamp: new Date().toISOString()
+    };
+  });
+
+  app.get('/admin/ui/api/analytics/telegram-flows/daily', async (request, reply) => {
+    if (!(await isAdminWithinRateLimit(rateLimit, request.headers['x-forwarded-for'], request.ip))) {
+      reply.code(429);
+      return { ok: false, error: 'rate_limited' };
+    }
+    if (!isAdminUiSessionAuthorized(request.headers.cookie, adminApiKey)) {
+      reply.code(401);
+      return { ok: false };
+    }
+
+    const query = adminAnalyticsDaysQuerySchema.parse(request.query);
+    const rows = normalizeFlowDailyCounters(await telegram.getFlowDailyCounters(query.days));
+
+    return {
+      ok: true,
+      days: query.days,
+      timezone: 'UTC',
+      rows,
+      daily: buildFlowDailyTimeline(rows, query.days),
+      timestamp: new Date().toISOString()
+    };
   });
 
   app.post('/telegram/webhook', async (request, reply) => {
@@ -373,12 +487,16 @@ const requestSafeLog = (app: FastifyInstance, error: unknown): void => {
   app.log.error({ err: error }, 'Health check failed');
 };
 
-const isAdminAuthorized = (headerValue: string | string[] | undefined, adminApiKey?: string): boolean => {
-  if (!adminApiKey) {
+const isAdminTokenAuthorized = (token: string | undefined, adminApiKey?: string): boolean => {
+  if (!adminApiKey || !token) {
     return false;
   }
-  const token = Array.isArray(headerValue) ? headerValue[0] : headerValue;
   return token === adminApiKey;
+};
+
+const isAdminAuthorized = (headerValue: string | string[] | undefined, adminApiKey?: string): boolean => {
+  const token = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+  return isAdminTokenAuthorized(token, adminApiKey);
 };
 
 const isWebhookAuthorized = (headerValue: string | string[] | undefined, webhookSecret?: string): boolean => {
@@ -515,6 +633,92 @@ const listRecentUtcDates = (days: number): string[] => {
   }
 
   return result;
+};
+
+const createAdminUiSessionCookie = (adminApiKey?: string): string => {
+  if (!adminApiKey) {
+    return clearAdminUiSessionCookie();
+  }
+
+  const expiresAtSec = Math.floor(Date.now() / 1000) + ADMIN_UI_SESSION_TTL_SEC;
+  const signature = signAdminUiSession(adminApiKey, expiresAtSec);
+  const value = `${expiresAtSec}.${signature}`;
+
+  return [
+    `${ADMIN_UI_SESSION_COOKIE}=${encodeURIComponent(value)}`,
+    'Path=/admin/ui',
+    'HttpOnly',
+    'Secure',
+    'SameSite=Strict',
+    `Max-Age=${ADMIN_UI_SESSION_TTL_SEC}`
+  ].join('; ');
+};
+
+const clearAdminUiSessionCookie = (): string =>
+  [
+    `${ADMIN_UI_SESSION_COOKIE}=`,
+    'Path=/admin/ui',
+    'HttpOnly',
+    'Secure',
+    'SameSite=Strict',
+    'Max-Age=0'
+  ].join('; ');
+
+const isAdminUiSessionAuthorized = (cookieHeader: string | string[] | undefined, adminApiKey?: string): boolean => {
+  if (!adminApiKey) {
+    return false;
+  }
+
+  const rawCookie = Array.isArray(cookieHeader) ? cookieHeader[0] : cookieHeader;
+  if (!rawCookie) {
+    return false;
+  }
+
+  const cookieValue = getCookieValue(rawCookie, ADMIN_UI_SESSION_COOKIE);
+  if (!cookieValue) {
+    return false;
+  }
+
+  const decoded = decodeURIComponent(cookieValue);
+  const [expiresAtSecText, signature] = decoded.split('.', 2);
+  const expiresAtSec = Number(expiresAtSecText);
+  if (!Number.isInteger(expiresAtSec) || !signature) {
+    return false;
+  }
+
+  if (expiresAtSec < Math.floor(Date.now() / 1000)) {
+    return false;
+  }
+
+  const expected = signAdminUiSession(adminApiKey, expiresAtSec);
+  return safeEqualHex(signature, expected);
+};
+
+const signAdminUiSession = (adminApiKey: string, expiresAtSec: number): string =>
+  createHmac('sha256', adminApiKey).update(`exp=${expiresAtSec}`).digest('hex');
+
+const getCookieValue = (cookieHeader: string, name: string): string | undefined => {
+  const prefix = `${name}=`;
+  const part = cookieHeader
+    .split(';')
+    .map((v) => v.trim())
+    .find((v) => v.startsWith(prefix));
+
+  if (!part) {
+    return undefined;
+  }
+
+  return part.slice(prefix.length);
+};
+
+const safeEqualHex = (a: string, b: string): boolean => {
+  if (a.length !== b.length) {
+    return false;
+  }
+
+  const aBuf = Buffer.from(a, 'utf8');
+  const bBuf = Buffer.from(b, 'utf8');
+  return timingSafeEqual(aBuf, bBuf);
 };
 
 const renderAdminUiHtml = (): string => `<!doctype html>
@@ -750,37 +954,45 @@ const renderAdminUiHtml = (): string => `<!doctype html>
         dailyBody: document.querySelector('#dailyTable tbody'),
         rawJson: document.getElementById('rawJson')
       };
-
-      const STORAGE_KEY = 'botcoach_admin_api_key';
+      const state = { authenticated: false };
 
       const setStatus = (text, kind) => {
         els.status.textContent = text;
         els.status.className = 'status' + (kind ? ' ' + kind : '');
       };
 
-      const getHeaders = () => {
-        const key = els.adminKey.value.trim();
-        if (!key) {
-          throw new Error('Введите ADMIN_API_KEY');
-        }
-        return { 'x-admin-key': key };
+      const setAuthUi = (authenticated) => {
+        state.authenticated = authenticated;
+        els.adminKey.disabled = authenticated;
+        els.refreshBtn.disabled = !authenticated;
+        els.saveBtn.textContent = authenticated ? 'Login OK' : 'Login';
+        els.clearBtn.textContent = authenticated ? 'Logout' : 'Clear';
       };
 
-      const fetchJson = async (path) => {
-        const response = await fetch(path, { headers: getHeaders() });
+      const fetchJson = async (path, options = {}) => {
+        const response = await fetch(path, {
+          credentials: 'same-origin',
+          ...options,
+          headers: {
+            'content-type': 'application/json',
+            ...(options.headers || {})
+          }
+        });
         const text = await response.text();
         let data;
         try {
           data = JSON.parse(text);
         } catch {
-          throw new Error('API вернул не-JSON');
+          throw new Error('API returned non-JSON');
         }
         if (!response.ok || data.ok === false) {
-          throw new Error(data.error ? 'Ошибка API: ' + data.error : 'HTTP ' + response.status);
+          const message = data.error ? 'API error: ' + data.error : 'HTTP ' + response.status;
+          const error = new Error(message);
+          error.statusCode = response.status;
+          throw error;
         }
         return data;
       };
-
       const renderKv = (container, rows) => {
         container.innerHTML = '';
         for (const [k, v] of rows) {
@@ -819,16 +1031,27 @@ const renderAdminUiHtml = (): string => `<!doctype html>
           els.dailyBody.appendChild(tr);
         }
       };
+      const clearRenderedData = () => {
+        els.feedbackSummary.innerHTML = '';
+        els.modeSummary.innerHTML = '';
+        els.dailyBody.innerHTML = '';
+        els.rawJson.textContent = 'Press Refresh after login';
+      };
 
       const refresh = async () => {
+        if (!state.authenticated) {
+          setStatus('Login first.', 'warn');
+          return;
+        }
+
         const days = Math.min(90, Math.max(1, Number(els.days.value || '14')));
         els.days.value = String(days);
-        setStatus('Загружаю...', 'warn');
+        setStatus('Loading...', 'warn');
         try {
           const [summary, daily, raw] = await Promise.all([
-            fetchJson('/admin/analytics/telegram-flows/summary'),
-            fetchJson('/admin/analytics/telegram-flows/daily?days=' + encodeURIComponent(String(days))),
-            fetchJson('/admin/analytics/telegram-flows')
+            fetchJson('/admin/ui/api/analytics/telegram-flows/summary', { headers: {} }),
+            fetchJson('/admin/ui/api/analytics/telegram-flows/daily?days=' + encodeURIComponent(String(days)), { headers: {} }),
+            fetchJson('/admin/ui/api/analytics/telegram-flows', { headers: {} })
           ]);
 
           renderKv(els.feedbackSummary, [
@@ -853,32 +1076,103 @@ const renderAdminUiHtml = (): string => `<!doctype html>
 
           renderDailyTable(daily.daily);
           els.rawJson.textContent = JSON.stringify({ summary, daily, raw }, null, 2);
-          setStatus('Данные обновлены.', 'good');
+          setStatus('Data refreshed.', 'good');
         } catch (error) {
-          setStatus(error instanceof Error ? error.message : 'Ошибка загрузки', 'warn');
+          if (error && typeof error === 'object' && error.statusCode === 401) {
+            setAuthUi(false);
+            clearRenderedData();
+            setStatus('Session expired. Login again.', 'warn');
+            return;
+          }
+          setStatus(error instanceof Error ? error.message : 'Load failed', 'warn');
         }
       };
 
+      const login = async () => {
+        const key = els.adminKey.value.trim();
+        if (!key) {
+          setStatus('Enter ADMIN_API_KEY.', 'warn');
+          return;
+        }
+
+        setStatus('Signing in...', 'warn');
+        try {
+          await fetchJson('/admin/ui/login', {
+            method: 'POST',
+            body: JSON.stringify({ adminApiKey: key }),
+            headers: {}
+          });
+          els.adminKey.value = '';
+          setAuthUi(true);
+          setStatus('Login OK. Loading data...', 'good');
+          await refresh();
+        } catch (error) {
+          setAuthUi(false);
+          setStatus(error instanceof Error ? error.message : 'Login failed', 'warn');
+        }
+      };
+
+      const logout = async () => {
+        try {
+          await fetchJson('/admin/ui/logout', { method: 'POST', body: '{}', headers: {} });
+        } catch {
+          // Ignore logout errors and clear UI state locally.
+        }
+        setAuthUi(false);
+        els.adminKey.value = '';
+        clearRenderedData();
+        setStatus('Logged out.', 'good');
+      };
       els.saveBtn.addEventListener('click', () => {
-        localStorage.setItem(STORAGE_KEY, els.adminKey.value);
-        setStatus('Ключ сохранен в localStorage этого браузера.', 'good');
+        if (state.authenticated) {
+          setStatus('Already logged in.', 'good');
+          return;
+        }
+        void login();
       });
 
       els.clearBtn.addEventListener('click', () => {
-        localStorage.removeItem(STORAGE_KEY);
+        if (state.authenticated) {
+          void logout();
+          return;
+        }
         els.adminKey.value = '';
-        setStatus('Ключ удален из localStorage.', 'good');
+        setStatus('Input cleared.', 'good');
       });
 
       els.refreshBtn.addEventListener('click', () => {
         void refresh();
       });
 
-      const savedKey = localStorage.getItem(STORAGE_KEY);
-      if (savedKey) {
-        els.adminKey.value = savedKey;
-        setStatus('Ключ подгружен из localStorage. Нажмите "Обновить".', 'good');
-      }
+      els.adminKey.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' && !state.authenticated) {
+          event.preventDefault();
+          void login();
+        }
+      });
+
+      const boot = async () => {
+        clearRenderedData();
+        setAuthUi(false);
+        setStatus('Checking session...', 'warn');
+        try {
+          const session = await fetchJson('/admin/ui/session', { headers: {} });
+          if (session.authenticated) {
+            setAuthUi(true);
+            setStatus('Session restored. Loading data...', 'good');
+            await refresh();
+          } else {
+            setAuthUi(false);
+            setStatus('Enter ADMIN_API_KEY and click Login.', 'warn');
+          }
+        } catch (error) {
+          setAuthUi(false);
+          setStatus(error instanceof Error ? error.message : 'Session check failed', 'warn');
+        }
+      };
+
+      void boot();
     </script>
   </body>
 </html>`;
+
