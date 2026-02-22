@@ -839,6 +839,41 @@ const renderAdminUiHtml = (): string => `<!doctype html>
       }
       .status.good { color: var(--good); }
       .status.warn { color: var(--warn); }
+      .toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 10px;
+        align-items: center;
+      }
+      .chips {
+        display: inline-flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      .chip {
+        width: auto;
+        padding: 6px 10px;
+        border-radius: 999px;
+        background: #fff;
+        color: var(--ink);
+        border: 1px solid var(--line);
+      }
+      .chip.active {
+        background: #dff1ee;
+        border-color: #9ed6cf;
+        color: #0b5f58;
+      }
+      .inlineToggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .inlineToggle input {
+        width: auto;
+        margin: 0;
+      }
       table {
         width: 100%;
         border-collapse: collapse;
@@ -899,6 +934,17 @@ const renderAdminUiHtml = (): string => `<!doctype html>
           <button id="saveBtn" type="button" class="secondary">Сохранить ключ</button>
           <button id="clearBtn" type="button" class="secondary">Очистить ключ</button>
         </div>
+        <div class="toolbar">
+          <div class="chips" aria-label="Quick day presets">
+            <button id="preset7Btn" type="button" class="chip secondary">7d</button>
+            <button id="preset14Btn" type="button" class="chip secondary">14d</button>
+            <button id="preset30Btn" type="button" class="chip secondary">30d</button>
+          </div>
+          <label class="inlineToggle" for="autoRefreshChk">
+            <input id="autoRefreshChk" type="checkbox" checked />
+            Auto refresh every 30s
+          </label>
+        </div>
         <div id="status" class="status">Готово.</div>
       </section>
 
@@ -948,13 +994,17 @@ const renderAdminUiHtml = (): string => `<!doctype html>
         refreshBtn: document.getElementById('refreshBtn'),
         saveBtn: document.getElementById('saveBtn'),
         clearBtn: document.getElementById('clearBtn'),
+        preset7Btn: document.getElementById('preset7Btn'),
+        preset14Btn: document.getElementById('preset14Btn'),
+        preset30Btn: document.getElementById('preset30Btn'),
+        autoRefreshChk: document.getElementById('autoRefreshChk'),
         status: document.getElementById('status'),
         feedbackSummary: document.getElementById('feedbackSummary'),
         modeSummary: document.getElementById('modeSummary'),
         dailyBody: document.querySelector('#dailyTable tbody'),
         rawJson: document.getElementById('rawJson')
       };
-      const state = { authenticated: false };
+      const state = { authenticated: false, autoRefreshTimerId: null, refreshInFlight: false };
 
       const setStatus = (text, kind) => {
         els.status.textContent = text;
@@ -967,6 +1017,34 @@ const renderAdminUiHtml = (): string => `<!doctype html>
         els.refreshBtn.disabled = !authenticated;
         els.saveBtn.textContent = authenticated ? 'Login OK' : 'Login';
         els.clearBtn.textContent = authenticated ? 'Logout' : 'Clear';
+        syncAutoRefresh();
+      };
+
+      const setPresetButtons = () => {
+        const currentDays = Number(els.days.value || '14');
+        for (const [days, el] of [
+          [7, els.preset7Btn],
+          [14, els.preset14Btn],
+          [30, els.preset30Btn]
+        ]) {
+          if (!el) continue;
+          el.classList.toggle('active', currentDays === days);
+        }
+      };
+
+      const syncAutoRefresh = () => {
+        if (state.autoRefreshTimerId) {
+          clearInterval(state.autoRefreshTimerId);
+          state.autoRefreshTimerId = null;
+        }
+
+        if (!state.authenticated || !els.autoRefreshChk.checked) {
+          return;
+        }
+
+        state.autoRefreshTimerId = setInterval(() => {
+          void refresh({ silent: true });
+        }, 30_000);
       };
 
       const fetchJson = async (path, options = {}) => {
@@ -1038,15 +1116,25 @@ const renderAdminUiHtml = (): string => `<!doctype html>
         els.rawJson.textContent = 'Press Refresh after login';
       };
 
-      const refresh = async () => {
+      const refresh = async (options = {}) => {
+        const silent = Boolean(options.silent);
         if (!state.authenticated) {
-          setStatus('Login first.', 'warn');
+          if (!silent) {
+            setStatus('Login first.', 'warn');
+          }
           return;
         }
+        if (state.refreshInFlight) {
+          return;
+        }
+        state.refreshInFlight = true;
 
         const days = Math.min(90, Math.max(1, Number(els.days.value || '14')));
         els.days.value = String(days);
-        setStatus('Loading...', 'warn');
+        setPresetButtons();
+        if (!silent) {
+          setStatus('Loading...', 'warn');
+        }
         try {
           const [summary, daily, raw] = await Promise.all([
             fetchJson('/admin/ui/api/analytics/telegram-flows/summary', { headers: {} }),
@@ -1076,15 +1164,22 @@ const renderAdminUiHtml = (): string => `<!doctype html>
 
           renderDailyTable(daily.daily);
           els.rawJson.textContent = JSON.stringify({ summary, daily, raw }, null, 2);
-          setStatus('Data refreshed.', 'good');
+          if (!silent) {
+            setStatus('Data refreshed.', 'good');
+          }
         } catch (error) {
           if (error && typeof error === 'object' && error.statusCode === 401) {
             setAuthUi(false);
             clearRenderedData();
             setStatus('Session expired. Login again.', 'warn');
+            state.refreshInFlight = false;
             return;
           }
-          setStatus(error instanceof Error ? error.message : 'Load failed', 'warn');
+          if (!silent) {
+            setStatus(error instanceof Error ? error.message : 'Load failed', 'warn');
+          }
+        } finally {
+          state.refreshInFlight = false;
         }
       };
 
@@ -1144,6 +1239,29 @@ const renderAdminUiHtml = (): string => `<!doctype html>
         void refresh();
       });
 
+      const applyPresetDays = (days) => {
+        els.days.value = String(days);
+        setPresetButtons();
+        if (state.authenticated) {
+          void refresh();
+        }
+      };
+
+      els.preset7Btn.addEventListener('click', () => applyPresetDays(7));
+      els.preset14Btn.addEventListener('click', () => applyPresetDays(14));
+      els.preset30Btn.addEventListener('click', () => applyPresetDays(30));
+
+      els.autoRefreshChk.addEventListener('change', () => {
+        syncAutoRefresh();
+        setStatus(els.autoRefreshChk.checked ? 'Auto refresh enabled (30s).' : 'Auto refresh disabled.', 'good');
+      });
+
+      els.days.addEventListener('change', () => {
+        const nextDays = Math.min(90, Math.max(1, Number(els.days.value || '14')));
+        els.days.value = String(nextDays);
+        setPresetButtons();
+      });
+
       els.adminKey.addEventListener('keydown', (event) => {
         if (event.key === 'Enter' && !state.authenticated) {
           event.preventDefault();
@@ -1154,6 +1272,7 @@ const renderAdminUiHtml = (): string => `<!doctype html>
       const boot = async () => {
         clearRenderedData();
         setAuthUi(false);
+        setPresetButtons();
         setStatus('Checking session...', 'warn');
         try {
           const session = await fetchJson('/admin/ui/session', { headers: {} });
@@ -1175,4 +1294,7 @@ const renderAdminUiHtml = (): string => `<!doctype html>
     </script>
   </body>
 </html>`;
+
+
+
 
