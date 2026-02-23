@@ -25,6 +25,7 @@ export type TelegramJobContext = {
   jobId: string;
   queue: string;
   attemptsMade: number;
+  enqueuedAtMs: number;
 };
 
 export type TelegramDlqJobPayload = {
@@ -171,7 +172,8 @@ export const createTelegramWorker = (
       const context: TelegramJobContext = {
         jobId: String(job.id ?? 'unknown'),
         queue: TELEGRAM_QUEUE,
-        attemptsMade: job.attemptsMade
+        attemptsMade: job.attemptsMade,
+        enqueuedAtMs: job.timestamp
       };
 
       logger.info(

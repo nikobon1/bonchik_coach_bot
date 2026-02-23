@@ -11,6 +11,12 @@ export type TelegramReportRecord = {
   userText: string;
   analysis: string;
   reply: string;
+  queueWaitMs?: number | null;
+  inputResolutionMs?: number | null;
+  analyzerDurationMs?: number | null;
+  reporterDurationMs?: number | null;
+  telegramSendDurationMs?: number | null;
+  totalDurationMs?: number | null;
 };
 
 export type TelegramReportView = {
@@ -24,6 +30,12 @@ export type TelegramReportView = {
   userText: string;
   analysis: string;
   reply: string;
+  queueWaitMs?: number | null;
+  inputResolutionMs?: number | null;
+  analyzerDurationMs?: number | null;
+  reporterDurationMs?: number | null;
+  telegramSendDurationMs?: number | null;
+  totalDurationMs?: number | null;
   createdAt: string;
 };
 
@@ -54,6 +66,12 @@ type TelegramReportRow = {
   user_text: string;
   analysis: string;
   reply: string;
+  queue_wait_ms: number | null;
+  input_resolution_ms: number | null;
+  analyzer_duration_ms: number | null;
+  reporter_duration_ms: number | null;
+  telegram_send_duration_ms: number | null;
+  total_duration_ms: number | null;
   created_at: string;
 };
 
@@ -74,8 +92,14 @@ export const appendTelegramReport = async (pool: Pool, report: TelegramReportRec
         reporter_model,
         user_text,
         analysis,
-        reply
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        reply,
+        queue_wait_ms,
+        input_resolution_ms,
+        analyzer_duration_ms,
+        reporter_duration_ms,
+        telegram_send_duration_ms,
+        total_duration_ms
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
     `,
     [
       report.chatId,
@@ -86,7 +110,13 @@ export const appendTelegramReport = async (pool: Pool, report: TelegramReportRec
       report.reporterModel,
       report.userText,
       report.analysis,
-      report.reply
+      report.reply,
+      report.queueWaitMs ?? null,
+      report.inputResolutionMs ?? null,
+      report.analyzerDurationMs ?? null,
+      report.reporterDurationMs ?? null,
+      report.telegramSendDurationMs ?? null,
+      report.totalDurationMs ?? null
     ]
   );
 };
@@ -133,6 +163,12 @@ export const listTelegramReportsByChat = async (
         user_text,
         analysis,
         reply,
+        queue_wait_ms,
+        input_resolution_ms,
+        analyzer_duration_ms,
+        reporter_duration_ms,
+        telegram_send_duration_ms,
+        total_duration_ms,
         created_at
       FROM telegram_reports
       WHERE chat_id = $1
@@ -153,6 +189,12 @@ export const listTelegramReportsByChat = async (
     userText: row.user_text,
     analysis: row.analysis,
     reply: row.reply,
+    queueWaitMs: row.queue_wait_ms,
+    inputResolutionMs: row.input_resolution_ms,
+    analyzerDurationMs: row.analyzer_duration_ms,
+    reporterDurationMs: row.reporter_duration_ms,
+    telegramSendDurationMs: row.telegram_send_duration_ms,
+    totalDurationMs: row.total_duration_ms,
     createdAt: row.created_at
   }));
 };
@@ -177,6 +219,12 @@ export const listTelegramReportsByChatInRange = async (
         user_text,
         analysis,
         reply,
+        queue_wait_ms,
+        input_resolution_ms,
+        analyzer_duration_ms,
+        reporter_duration_ms,
+        telegram_send_duration_ms,
+        total_duration_ms,
         created_at
       FROM telegram_reports
       WHERE chat_id = $1
@@ -199,6 +247,12 @@ export const listTelegramReportsByChatInRange = async (
     userText: row.user_text,
     analysis: row.analysis,
     reply: row.reply,
+    queueWaitMs: row.queue_wait_ms,
+    inputResolutionMs: row.input_resolution_ms,
+    analyzerDurationMs: row.analyzer_duration_ms,
+    reporterDurationMs: row.reporter_duration_ms,
+    telegramSendDurationMs: row.telegram_send_duration_ms,
+    totalDurationMs: row.total_duration_ms,
     createdAt: row.created_at
   }));
 };
