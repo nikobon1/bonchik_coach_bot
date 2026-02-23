@@ -17,6 +17,7 @@ type BuildAppOptions = {
   };
   telegram: {
     webhookSecret?: string;
+    sendChatAction?: (chatId: number, action: 'typing') => Promise<void>;
     enqueueMessage: (payload: TelegramMessagePayload) => Promise<void>;
     markUpdateProcessed: (updateId: number) => Promise<boolean>;
     getQueueHealth: () => Promise<{
@@ -295,11 +296,23 @@ export const buildApp = ({ logger, checks, telegram, adminApiKey, rateLimit }: B
           }
         : undefined;
 
+    const chatId = parsed.data.message.chat.id;
+    const userId = parsed.data.message.from.id;
+    const username = parsed.data.message.from.username;
+
+    if (telegram.sendChatAction) {
+      try {
+        await telegram.sendChatAction(chatId, 'typing');
+      } catch (error) {
+        app.log.warn({ err: error, chatId, updateId: parsed.data.update_id }, 'Failed to send early typing action');
+      }
+    }
+
     await telegram.enqueueMessage({
       updateId: parsed.data.update_id,
-      chatId: parsed.data.message.chat.id,
-      userId: parsed.data.message.from.id,
-      username: parsed.data.message.from.username,
+      chatId,
+      userId,
+      username,
       text: parsed.data.message.text,
       media
     });

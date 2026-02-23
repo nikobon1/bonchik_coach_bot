@@ -5,6 +5,14 @@ export type TelegramSendMessageInput = {
   replyMarkup?: unknown;
 };
 
+export type TelegramChatAction = 'typing';
+
+export type TelegramSendChatActionInput = {
+  botToken: string;
+  chatId: number;
+  action: TelegramChatAction;
+};
+
 export type TelegramWebhookInput = {
   botToken: string;
   appUrl: string;
@@ -38,6 +46,28 @@ export const sendTelegramMessage = async ({
   if (!response.ok) {
     const body = await response.text();
     throw new Error(`Telegram sendMessage failed (${response.status}): ${body}`);
+  }
+};
+
+export const sendTelegramChatAction = async ({
+  botToken,
+  chatId,
+  action
+}: TelegramSendChatActionInput): Promise<void> => {
+  const response = await fetch(`https://api.telegram.org/bot${botToken}/sendChatAction`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({
+      chat_id: chatId,
+      action
+    })
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Telegram sendChatAction failed (${response.status}): ${body}`);
   }
 };
 

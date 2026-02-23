@@ -19,6 +19,7 @@ import {
   pingRedis,
   requeueDlqJob,
   runMigrations,
+  sendTelegramChatAction,
   setTelegramWebhook
 } from '@bonchik/shared';
 
@@ -45,6 +46,12 @@ export const startServer = async (): Promise<void> => {
     },
     telegram: {
       webhookSecret: config.TELEGRAM_WEBHOOK_SECRET,
+      sendChatAction: (chatId, action) =>
+        sendTelegramChatAction({
+          botToken: config.TELEGRAM_BOT_TOKEN,
+          chatId,
+          action
+        }),
       enqueueMessage: async (payload) => {
         await enqueueTelegramJob(queue, payload);
       },

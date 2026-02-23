@@ -48,6 +48,7 @@ import {
   renderModeDescriptionsRu,
   renderModeInfoSummaryRu,
   runMigrations,
+  sendTelegramChatAction,
   sendTelegramMessage,
   setAwaitingFeedbackState,
   setAwaitingModeRecommendationState,
@@ -83,6 +84,7 @@ const OPENROUTER_ANALYZER_TIMEOUT_MS = 35_000;
 const OPENROUTER_REPORTER_TIMEOUT_MS = 25_000;
 const OPENROUTER_DAILY_SUMMARY_TIMEOUT_MS = 30_000;
 const TELEGRAM_MESSAGE_MAX_LENGTH = 4000;
+const TELEGRAM_TYPING_HEARTBEAT_MS = 4_000;
 const MORNING_SUMMARY_MAX_REPORTS_PER_CHAT = 24;
 const FALLBACK_REPLY =
   'Сейчас временно не удалось сформировать ответ. Попробуйте еще раз через 20-30 секунд.';
@@ -135,6 +137,53 @@ const recordTelegramFlowCounterSafely = async (
       },
       'Failed to record telegram flow event'
     );
+  }
+};
+
+const withTelegramTyping = async <T>({
+  botToken,
+  chatId,
+  logger,
+  task
+}: {
+  botToken: string;
+  chatId: number;
+  logger: AppLogger;
+  task: () => Promise<T>;
+}): Promise<T> => {
+  let stopped = false;
+  let loggedFailure = false;
+
+  const pulse = async (): Promise<void> => {
+    try {
+      await sendTelegramChatAction({
+        botToken,
+        chatId,
+        action: 'typing'
+      });
+    } catch (error) {
+      if (!loggedFailure) {
+        loggedFailure = true;
+        logger.warn({ err: error, chatId }, 'Failed to send Telegram typing action');
+      }
+    }
+  };
+
+  await pulse();
+  const timer = setInterval(() => {
+    if (stopped) {
+      return;
+    }
+
+    void pulse();
+  }, TELEGRAM_TYPING_HEARTBEAT_MS);
+  timer.unref();
+
+  try {
+    return await task();
+  } finally {
+    stopped = true;
+    clearInterval(timer);
   }
 };
 
@@ -259,13 +308,15 @@ const processTelegramJob = async (
   logger: AppLogger,
   metrics: WorkerMetrics
 ): Promise<void> => {
-  const userInputText = await resolveUserInputText(
-    payload,
-    telegramBotToken,
-    openRouterApiKey,
-    transcriberModel,
-    logger
-  );
+  const userInputText = payload.media
+    ? await withTelegramTyping({
+        botToken: telegramBotToken,
+        chatId: payload.chatId,
+        logger,
+        task: () =>
+          resolveUserInputText(payload, telegramBotToken, openRouterApiKey, transcriberModel, logger)
+      })
+    : await resolveUserInputText(payload, telegramBotToken, openRouterApiKey, transcriberModel, logger);
 
   if (isFeedbackStartRequest(userInputText)) {
     await setAwaitingFeedbackState(pool, payload.userId, true);
@@ -458,58 +509,67 @@ const processTelegramJob = async (
   });
 
   const history = await getRecentChatHistory(pool, payload.chatId, 12);
-  const analysis = await buildAnalysis({
-    strategyMode: strategy.mode,
+  const { analysis, answer } = await withTelegramTyping({
+    botToken: telegramBotToken,
     chatId: payload.chatId,
-    context,
-    history,
     logger,
-    metrics,
-    openRouterApiKey,
-    analyzerModel,
-    analyzerSystemPrompt: strategy.analyzerSystemPrompt
-  });
-
-  const generatedAnswer = await buildAnswer({
-    strategyMode: strategy.mode,
-    chatId: payload.chatId,
-    context,
-    analysis,
-    history,
-    logger,
-    metrics,
-    openRouterApiKey,
-    reporterModel,
-    reporterSystemPrompt: strategy.reporterSystemPrompt
-  });
-
-  const answer = clampTelegramText(generatedAnswer);
-
-  await retryAsync(
-    () =>
-      sendTelegramMessage({
-        botToken: telegramBotToken,
+    task: async () => {
+      const analysis = await buildAnalysis({
+        strategyMode: strategy.mode,
         chatId: payload.chatId,
-        text: answer
-      }),
-    {
-      attempts: 3,
-      baseDelayMs: 500,
-      shouldRetry: isRetryableNetworkError,
-      onRetry: (error, attempt, waitMs) => {
-        metrics.telegramRetries += 1;
-        logger.warn(
-          {
-            err: error,
-            ...toCorrelation(payload, context),
-            attempt,
-            waitMs
-          },
-          'Retrying Telegram send'
-        );
-      }
+        context,
+        history,
+        logger,
+        metrics,
+        openRouterApiKey,
+        analyzerModel,
+        analyzerSystemPrompt: strategy.analyzerSystemPrompt
+      });
+
+      const generatedAnswer = await buildAnswer({
+        strategyMode: strategy.mode,
+        chatId: payload.chatId,
+        context,
+        analysis,
+        history,
+        logger,
+        metrics,
+        openRouterApiKey,
+        reporterModel,
+        reporterSystemPrompt: strategy.reporterSystemPrompt
+      });
+
+      const answer = clampTelegramText(generatedAnswer);
+
+      await retryAsync(
+        () =>
+          sendTelegramMessage({
+            botToken: telegramBotToken,
+            chatId: payload.chatId,
+            text: answer
+          }),
+        {
+          attempts: 3,
+          baseDelayMs: 500,
+          shouldRetry: isRetryableNetworkError,
+          onRetry: (error, attempt, waitMs) => {
+            metrics.telegramRetries += 1;
+            logger.warn(
+              {
+                err: error,
+                ...toCorrelation(payload, context),
+                attempt,
+                waitMs
+              },
+              'Retrying Telegram send'
+            );
+          }
+        }
+      );
+
+      return { analysis, answer };
     }
-  );
+  });
 
   await appendChatMessage(pool, {
     chatId: payload.chatId,
