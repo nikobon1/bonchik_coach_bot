@@ -46,7 +46,24 @@ const run = async (): Promise<void> => {
       getFlowDailyCounters: async () => [
         { date: todayUtc, key: 'feedback_started', value: 2 },
         { date: todayUtc, key: 'feedback_saved', value: 1 }
-      ]
+      ],
+      getMorningSummaryStatus: async () => ({
+        enabled: true,
+        cron: '0 8 * * *',
+        timezone: 'Europe/Moscow',
+        stats: {
+          totalSent: 3,
+          sentLast24h: 1,
+          sentTodayUtc: 1,
+          distinctChatsLast7d: 2,
+          lastSentAt: new Date().toISOString(),
+          lastSummaryDate: todayUtc,
+          lastTimezone: 'Europe/Moscow',
+          lastChatId: 1,
+          lastUserId: 2,
+          lastReportsCount: 4
+        }
+      })
     }
   });
 
@@ -88,6 +105,15 @@ const run = async (): Promise<void> => {
   });
   assert.equal(uiSummaryResponse.statusCode, 200);
   assert.equal(uiSummaryResponse.json().ok, true);
+
+  const uiMorningSummaryResponse = await healthyApp.inject({
+    method: 'GET',
+    url: '/admin/ui/api/morning-summary/status',
+    headers: { cookie: uiCookieHeader as string }
+  });
+  assert.equal(uiMorningSummaryResponse.statusCode, 200);
+  assert.equal(uiMorningSummaryResponse.json().ok, true);
+  assert.equal(uiMorningSummaryResponse.json().stats.totalSent, 3);
 
   const webhookResponse = await healthyApp.inject({
     method: 'POST',
@@ -233,6 +259,17 @@ const run = async (): Promise<void> => {
   assert.equal(flowDailyResponse.json().daily.at(-1).summary.feedback.started, 2);
   assert.equal(flowDailyResponse.json().daily.at(-1).summary.feedback.completed, 1);
 
+  const morningSummaryStatusResponse = await healthyApp.inject({
+    method: 'GET',
+    url: '/admin/morning-summary/status',
+    headers: {
+      'x-admin-key': 'test-admin-key'
+    }
+  });
+  assert.equal(morningSummaryStatusResponse.statusCode, 200);
+  assert.equal(morningSummaryStatusResponse.json().ok, true);
+  assert.equal(morningSummaryStatusResponse.json().enabled, true);
+
   await healthyApp.close();
 
   const rateLimitedApp = buildApp({
@@ -260,7 +297,13 @@ const run = async (): Promise<void> => {
       getReportsByChat: async () => [],
       getFeedbackByChat: async () => [],
       getFlowCounters: async () => [],
-      getFlowDailyCounters: async () => []
+      getFlowDailyCounters: async () => [],
+      getMorningSummaryStatus: async () => ({
+        enabled: false,
+        cron: '0 8 * * *',
+        timezone: 'Europe/Moscow',
+        stats: { totalSent: 0, sentLast24h: 0, sentTodayUtc: 0, distinctChatsLast7d: 0 }
+      })
     }
   });
 
@@ -306,7 +349,13 @@ const run = async (): Promise<void> => {
       getReportsByChat: async () => [],
       getFeedbackByChat: async () => [],
       getFlowCounters: async () => [],
-      getFlowDailyCounters: async () => []
+      getFlowDailyCounters: async () => [],
+      getMorningSummaryStatus: async () => ({
+        enabled: false,
+        cron: '0 8 * * *',
+        timezone: 'Europe/Moscow',
+        stats: { totalSent: 0, sentLast24h: 0, sentTodayUtc: 0, distinctChatsLast7d: 0 }
+      })
     }
   });
 

@@ -14,6 +14,7 @@ import {
   listTelegramFlowCounters,
   listTelegramFlowDailyCounters,
   listTelegramReportsByChat,
+  getTelegramMorningSummaryStatus,
   loadConfig,
   markTelegramUpdateProcessed,
   pingRedis,
@@ -66,7 +67,14 @@ export const startServer = async (): Promise<void> => {
       getReportsByChat: (chatId, limit) => listTelegramReportsByChat(pool, chatId, limit),
       getFeedbackByChat: (chatId, limit) => listTelegramFeedbackByChat(pool, chatId, limit),
       getFlowCounters: () => listTelegramFlowCounters(pool),
-      getFlowDailyCounters: (days) => listTelegramFlowDailyCounters(pool, days)
+      getFlowDailyCounters: (days) => listTelegramFlowDailyCounters(pool, days),
+      getMorningSummaryStatus: async () => ({
+        enabled: config.MORNING_SUMMARY_ENABLED,
+        cron: config.MORNING_SUMMARY_CRON,
+        timezone: config.MORNING_SUMMARY_TZ,
+        stats: await getTelegramMorningSummaryStatus(pool),
+        timestamp: new Date().toISOString()
+      })
     }
   });
 

@@ -31,6 +31,7 @@ type BuildAppOptions = {
     getFeedbackByChat: (chatId: number, limit?: number) => Promise<unknown[]>;
     getFlowCounters: () => Promise<unknown[]>;
     getFlowDailyCounters: (days?: number) => Promise<unknown[]>;
+    getMorningSummaryStatus: () => Promise<Record<string, unknown>>;
   };
 };
 
@@ -251,6 +252,22 @@ export const buildApp = ({ logger, checks, telegram, adminApiKey, rateLimit }: B
       rows,
       daily: buildFlowDailyTimeline(rows, query.days),
       timestamp: new Date().toISOString()
+    };
+  });
+
+  app.get('/admin/ui/api/morning-summary/status', async (request, reply) => {
+    if (!(await isAdminWithinRateLimit(rateLimit, request.headers['x-forwarded-for'], request.ip))) {
+      reply.code(429);
+      return { ok: false, error: 'rate_limited' };
+    }
+    if (!isAdminUiSessionAuthorized(request.headers.cookie, adminApiKey)) {
+      reply.code(401);
+      return { ok: false };
+    }
+
+    return {
+      ok: true,
+      ...(await telegram.getMorningSummaryStatus())
     };
   });
 
@@ -490,6 +507,22 @@ export const buildApp = ({ logger, checks, telegram, adminApiKey, rateLimit }: B
       rows,
       daily: buildFlowDailyTimeline(rows, query.days),
       timestamp: new Date().toISOString()
+    };
+  });
+
+  app.get('/admin/morning-summary/status', async (request, reply) => {
+    if (!(await isAdminWithinRateLimit(rateLimit, request.headers['x-forwarded-for'], request.ip))) {
+      reply.code(429);
+      return { ok: false, error: 'rate_limited' };
+    }
+    if (!isAdminAuthorized(request.headers['x-admin-key'], adminApiKey)) {
+      reply.code(401);
+      return { ok: false };
+    }
+
+    return {
+      ok: true,
+      ...(await telegram.getMorningSummaryStatus())
     };
   });
 
@@ -825,7 +858,7 @@ const renderAdminUiHtml = (): string => `<!doctype html>
       button.secondary:hover { background: #f7f3eb; }
       .cards {
         display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
         gap: 12px;
         margin-bottom: 14px;
       }
@@ -970,6 +1003,10 @@ const renderAdminUiHtml = (): string => `<!doctype html>
           <h2>Mode Recommendation</h2>
           <div id="modeSummary" class="kv"></div>
         </article>
+        <article class="card">
+          <h2>Morning Summary</h2>
+          <div id="morningSummary" class="kv"></div>
+        </article>
       </section>
 
       <section class="panel" style="margin-bottom:14px;">
@@ -1014,6 +1051,7 @@ const renderAdminUiHtml = (): string => `<!doctype html>
         status: document.getElementById('status'),
         feedbackSummary: document.getElementById('feedbackSummary'),
         modeSummary: document.getElementById('modeSummary'),
+        morningSummary: document.getElementById('morningSummary'),
         dailyBody: document.querySelector('#dailyTable tbody'),
         rawJson: document.getElementById('rawJson')
       };
@@ -1125,6 +1163,7 @@ const renderAdminUiHtml = (): string => `<!doctype html>
       const clearRenderedData = () => {
         els.feedbackSummary.innerHTML = '';
         els.modeSummary.innerHTML = '';
+        els.morningSummary.innerHTML = '';
         els.dailyBody.innerHTML = '';
         els.rawJson.textContent = 'Press Refresh after login';
       };
@@ -1149,10 +1188,11 @@ const renderAdminUiHtml = (): string => `<!doctype html>
           setStatus('Loading...', 'warn');
         }
         try {
-          const [summary, daily, raw] = await Promise.all([
+          const [summary, daily, raw, morningSummary] = await Promise.all([
             fetchJson('/admin/ui/api/analytics/telegram-flows/summary', { headers: {} }),
             fetchJson('/admin/ui/api/analytics/telegram-flows/daily?days=' + encodeURIComponent(String(days)), { headers: {} }),
-            fetchJson('/admin/ui/api/analytics/telegram-flows', { headers: {} })
+            fetchJson('/admin/ui/api/analytics/telegram-flows', { headers: {} }),
+            fetchJson('/admin/ui/api/morning-summary/status', { headers: {} })
           ]);
 
           renderKv(els.feedbackSummary, [
@@ -1175,8 +1215,24 @@ const renderAdminUiHtml = (): string => `<!doctype html>
             ['dropRatePct', summary.summary.modeRecommendation.dropRatePct]
           ]);
 
+          const ms = morningSummary.stats || {};
+          renderKv(els.morningSummary, [
+            ['enabled', Boolean(morningSummary.enabled)],
+            ['cron', morningSummary.cron || ''],
+            ['timezone', morningSummary.timezone || ''],
+            ['sentTodayUtc', ms.sentTodayUtc ?? 0],
+            ['sentLast24h', ms.sentLast24h ?? 0],
+            ['distinctChatsLast7d', ms.distinctChatsLast7d ?? 0],
+            ['totalSent', ms.totalSent ?? 0],
+            ['lastSentAt', ms.lastSentAt || ''],
+            ['lastSummaryDate', ms.lastSummaryDate || ''],
+            ['lastTimezone', ms.lastTimezone || ''],
+            ['lastChatId', ms.lastChatId ?? ''],
+            ['lastReportsCount', ms.lastReportsCount ?? '']
+          ]);
+
           renderDailyTable(daily.daily);
-          els.rawJson.textContent = JSON.stringify({ summary, daily, raw }, null, 2);
+          els.rawJson.textContent = JSON.stringify({ summary, daily, raw, morningSummary }, null, 2);
           if (!silent) {
             setStatus('Data refreshed.', 'good');
           }

@@ -55,6 +55,19 @@ export type TelegramDailySummaryRecord = {
   summaryText: string;
 };
 
+export type TelegramMorningSummaryStatus = {
+  totalSent: number;
+  sentLast24h: number;
+  sentTodayUtc: number;
+  distinctChatsLast7d: number;
+  lastSentAt?: string;
+  lastSummaryDate?: string;
+  lastTimezone?: string;
+  lastChatId?: number;
+  lastUserId?: number;
+  lastReportsCount?: number;
+};
+
 type TelegramReportRow = {
   id: number;
   chat_id: number;
@@ -78,6 +91,19 @@ type TelegramReportRow = {
 type TelegramReportChatRefRow = {
   chat_id: number;
   user_id: number;
+};
+
+type TelegramMorningSummaryStatusRow = {
+  total_sent: number;
+  sent_last_24h: number;
+  sent_today_utc: number;
+  distinct_chats_last_7d: number;
+  last_sent_at: string | null;
+  last_summary_date: string | null;
+  last_timezone: string | null;
+  last_chat_id: number | null;
+  last_user_id: number | null;
+  last_reports_count: number | null;
 };
 
 export const appendTelegramReport = async (pool: Pool, report: TelegramReportRecord): Promise<void> => {
@@ -309,4 +335,79 @@ export const hasTelegramDailySummaryForDate = async (
   );
 
   return (result.rowCount ?? 0) > 0;
+};
+
+export const getTelegramMorningSummaryStatus = async (pool: Pool): Promise<TelegramMorningSummaryStatus> => {
+  const result = await pool.query(
+    `
+      SELECT
+        COALESCE((SELECT COUNT(*)::INT FROM telegram_daily_summaries), 0) AS total_sent,
+        COALESCE(
+          (
+            SELECT COUNT(*)::INT
+            FROM telegram_daily_summaries
+            WHERE sent_at >= NOW() - INTERVAL '24 hours'
+          ),
+          0
+        ) AS sent_last_24h,
+        COALESCE(
+          (
+            SELECT COUNT(*)::INT
+            FROM telegram_daily_summaries
+            WHERE (sent_at AT TIME ZONE 'UTC')::DATE = (NOW() AT TIME ZONE 'UTC')::DATE
+          ),
+          0
+        ) AS sent_today_utc,
+        COALESCE(
+          (
+            SELECT COUNT(DISTINCT chat_id)::INT
+            FROM telegram_daily_summaries
+            WHERE sent_at >= NOW() - INTERVAL '7 days'
+          ),
+          0
+        ) AS distinct_chats_last_7d,
+        latest.sent_at AS last_sent_at,
+        latest.summary_date::TEXT AS last_summary_date,
+        latest.timezone AS last_timezone,
+        latest.chat_id AS last_chat_id,
+        latest.user_id AS last_user_id,
+        latest.reports_count AS last_reports_count
+      FROM (SELECT 1) AS seed
+      LEFT JOIN LATERAL (
+        SELECT
+          sent_at,
+          summary_date,
+          timezone,
+          chat_id,
+          user_id,
+          reports_count
+        FROM telegram_daily_summaries
+        ORDER BY sent_at DESC, id DESC
+        LIMIT 1
+      ) AS latest ON TRUE
+    `
+  );
+
+  const row = result.rows[0] as TelegramMorningSummaryStatusRow | undefined;
+  if (!row) {
+    return {
+      totalSent: 0,
+      sentLast24h: 0,
+      sentTodayUtc: 0,
+      distinctChatsLast7d: 0
+    };
+  }
+
+  return {
+    totalSent: row.total_sent,
+    sentLast24h: row.sent_last_24h,
+    sentTodayUtc: row.sent_today_utc,
+    distinctChatsLast7d: row.distinct_chats_last_7d,
+    lastSentAt: row.last_sent_at ?? undefined,
+    lastSummaryDate: row.last_summary_date ?? undefined,
+    lastTimezone: row.last_timezone ?? undefined,
+    lastChatId: row.last_chat_id ?? undefined,
+    lastUserId: row.last_user_id ?? undefined,
+    lastReportsCount: row.last_reports_count ?? undefined
+  };
 };
