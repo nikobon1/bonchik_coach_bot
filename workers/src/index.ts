@@ -76,6 +76,12 @@ type WorkerMetrics = {
   openRouterRetries: number;
   telegramRetries: number;
   fallbacks: number;
+  analyzerTimeoutFallbacks: number;
+  reporterTimeoutFallbacks: number;
+  reporterBudgetFallbacks: number;
+  morningSummaryTimeoutFallbacks: number;
+  transcriptionTimeouts: number;
+  openRouterAbortTimeouts: number;
   dlqPushed: number;
 };
 type TelegramReplyLatencySnapshot = {
@@ -91,6 +97,9 @@ const OPENROUTER_TRANSCRIBER_TIMEOUT_MS = 20_000;
 const OPENROUTER_ANALYZER_TIMEOUT_MS = 35_000;
 const OPENROUTER_REPORTER_TIMEOUT_MS = 25_000;
 const OPENROUTER_DAILY_SUMMARY_TIMEOUT_MS = 30_000;
+const TELEGRAM_REPLY_TOTAL_BUDGET_MS = 60_000;
+const OPENROUTER_MIN_ATTEMPT_TIMEOUT_MS = 4_000;
+const OPENROUTER_MIN_RETRY_REMAINING_MS = 8_000;
 const TELEGRAM_MESSAGE_MAX_LENGTH = 4000;
 const TELEGRAM_TYPING_HEARTBEAT_MS = 4_000;
 const TELEGRAM_PROGRESS_NOTICE_DELAY_MS = 10_000;
@@ -107,6 +116,20 @@ type SummaryWindow = {
   fromInclusive: string;
   toExclusive: string;
 };
+
+type LlmFallbackReason =
+  | 'analyzer_timeout'
+  | 'analyzer_budget'
+  | 'analyzer_upstream'
+  | 'reporter_timeout'
+  | 'reporter_budget'
+  | 'reporter_upstream'
+  | 'morning_summary_timeout'
+  | 'morning_summary_budget'
+  | 'morning_summary_upstream'
+  | 'transcription_timeout'
+  | 'transcription_budget'
+  | 'transcription_upstream';
 
 const recordTelegramFlowCounterSafely = async (
   pool: DbPool,
@@ -386,9 +409,9 @@ const processTelegramJob = async (
         chatId: payload.chatId,
         logger,
         task: () =>
-          resolveUserInputText(payload, telegramBotToken, openRouterApiKey, transcriberModel, logger)
+          resolveUserInputText(payload, telegramBotToken, openRouterApiKey, transcriberModel, logger, metrics)
       })
-    : await resolveUserInputText(payload, telegramBotToken, openRouterApiKey, transcriberModel, logger);
+    : await resolveUserInputText(payload, telegramBotToken, openRouterApiKey, transcriberModel, logger, metrics);
   const inputResolutionMs = Date.now() - inputResolutionStartedAtMs;
 
   if (isFeedbackStartRequest(userInputText)) {
@@ -582,6 +605,7 @@ const processTelegramJob = async (
   });
 
   const history = await getRecentChatHistory(pool, payload.chatId, 12);
+  const llmReplyDeadlineAtMs = Date.now() + TELEGRAM_REPLY_TOTAL_BUDGET_MS;
   let analyzerDurationMs: number | null = null;
   let reporterDurationMs: number | null = null;
   let telegramSendDurationMs: number | null = null;
@@ -610,7 +634,8 @@ const processTelegramJob = async (
             metrics,
             openRouterApiKey,
             analyzerModel,
-            analyzerSystemPrompt: strategy.analyzerSystemPrompt
+            analyzerSystemPrompt: strategy.analyzerSystemPrompt,
+            deadlineAtMs: llmReplyDeadlineAtMs
           });
           analyzerDurationMs = Date.now() - analyzerStartedAtMs;
 
@@ -625,7 +650,8 @@ const processTelegramJob = async (
             metrics,
             openRouterApiKey,
             reporterModel,
-            reporterSystemPrompt: strategy.reporterSystemPrompt
+            reporterSystemPrompt: strategy.reporterSystemPrompt,
+            deadlineAtMs: llmReplyDeadlineAtMs
           });
           reporterDurationMs = Date.now() - reporterStartedAtMs;
 
@@ -684,7 +710,11 @@ const processTelegramJob = async (
       updateId: payload.updateId,
       coachMode: strategy.mode,
       progressNoticeSent,
-      latency
+      latency,
+      llmBudget: {
+        totalMs: TELEGRAM_REPLY_TOTAL_BUDGET_MS,
+        remainingAfterReplyMs: getRemainingBudgetMs(llmReplyDeadlineAtMs)
+      }
     },
     'Telegram reply latency snapshot'
   );
@@ -884,10 +914,12 @@ const buildMorningSummary = async ({
   try {
     return await retryAsync(
       () =>
-        withTimeout(
-          createOpenRouterChatCompletion({
+        withAbortableTimeout(
+          (signal) =>
+            createOpenRouterChatCompletion({
             apiKey: openRouterApiKey,
             model: reporterModel,
+            signal,
             messages: [
               {
                 role: 'system',
@@ -913,9 +945,12 @@ const buildMorningSummary = async ({
                 ].join('\n')
               }
             ]
-          }),
+            }),
           OPENROUTER_DAILY_SUMMARY_TIMEOUT_MS,
-          'OpenRouter daily summary timeout'
+          'OpenRouter daily summary timeout',
+          () => {
+            metrics.openRouterAbortTimeouts += 1;
+          }
         ),
       {
         attempts: 3,
@@ -938,8 +973,9 @@ const buildMorningSummary = async ({
       }
     );
   } catch (error) {
-    metrics.fallbacks += 1;
-    logger.warn({ err: error, context, chatId, summaryDate }, 'Falling back for morning summary');
+    const fallbackReason = classifyLlmFallbackReason('morning_summary', error);
+    recordLlmFallbackMetric(metrics, fallbackReason);
+    logger.warn({ err: error, context, chatId, summaryDate, fallbackReason }, 'Falling back for morning summary');
     return buildMorningSummaryFallback(reports);
   }
 };
@@ -1024,7 +1060,8 @@ const resolveUserInputText = async (
   telegramBotToken: string,
   openRouterApiKey: string,
   transcriberModel: string,
-  logger: AppLogger
+  logger: AppLogger,
+  metrics: WorkerMetrics
 ): Promise<string> => {
   if (payload.text && payload.text.trim().length > 0) {
     return payload.text;
@@ -1033,37 +1070,43 @@ const resolveUserInputText = async (
   if (!payload.media) {
     throw new Error('Telegram payload has no text or media');
   }
+  const media = payload.media;
 
   const startedAtMs = Date.now();
   logger.info(
     {
       chatId: payload.chatId,
       userId: payload.userId,
-      mediaKind: payload.media.kind,
-      fileId: payload.media.fileId
+      mediaKind: media.kind,
+      fileId: media.fileId
     },
     'Telegram media transcription started'
   );
 
   try {
-    const downloaded = await downloadTelegramFileById(telegramBotToken, payload.media.fileId);
-    const transcription = await withTimeout(
-      createOpenRouterTranscription({
-        apiKey: openRouterApiKey,
-        model: transcriberModel,
-        bytes: downloaded.bytes,
-        filename: extractFileName(downloaded.filePath),
-        mimeType: payload.media.mimeType ?? downloaded.contentType
-      }),
+    const downloaded = await downloadTelegramFileById(telegramBotToken, media.fileId);
+    const transcription = await withAbortableTimeout(
+      (signal) =>
+        createOpenRouterTranscription({
+          apiKey: openRouterApiKey,
+          model: transcriberModel,
+          bytes: downloaded.bytes,
+          filename: extractFileName(downloaded.filePath),
+          mimeType: media.mimeType ?? downloaded.contentType,
+          signal
+        }),
       OPENROUTER_TRANSCRIBER_TIMEOUT_MS,
-      'OpenRouter transcription timeout'
+      'OpenRouter transcription timeout',
+      () => {
+        metrics.openRouterAbortTimeouts += 1;
+      }
     );
 
     logger.info(
       {
         chatId: payload.chatId,
         userId: payload.userId,
-        mediaKind: payload.media.kind,
+        mediaKind: media.kind,
         filePath: downloaded.filePath,
         durationMs: Date.now() - startedAtMs,
         transcriptionChars: transcription.length
@@ -1073,12 +1116,17 @@ const resolveUserInputText = async (
 
     return transcription;
   } catch (error) {
+    const fallbackReason = classifyLlmFallbackReason('transcription', error);
+    if (fallbackReason === 'transcription_timeout') {
+      recordLlmFallbackMetric(metrics, fallbackReason);
+    }
     logger.warn(
       {
         err: error,
         chatId: payload.chatId,
         userId: payload.userId,
-        durationMs: Date.now() - startedAtMs
+        durationMs: Date.now() - startedAtMs,
+        fallbackReason
       },
       'Transcription failed'
     );
@@ -1157,7 +1205,8 @@ const buildAnalysis = async ({
   metrics,
   openRouterApiKey,
   analyzerModel,
-  analyzerSystemPrompt
+  analyzerSystemPrompt,
+  deadlineAtMs
 }: {
   strategyMode: CoachMode;
   chatId: number;
@@ -1168,29 +1217,43 @@ const buildAnalysis = async ({
   openRouterApiKey: string;
   analyzerModel: string;
   analyzerSystemPrompt: string;
+  deadlineAtMs?: number;
 }): Promise<string> => {
   try {
     return await retryAsync(
-      () =>
-        withTimeout(
-          createOpenRouterChatCompletion({
-            apiKey: openRouterApiKey,
-            model: analyzerModel,
-            messages: [
-              {
-                role: 'system',
-                content: analyzerSystemPrompt
-              },
-              ...history
-            ]
-          }),
-          OPENROUTER_ANALYZER_TIMEOUT_MS,
-          'OpenRouter timeout'
-        ),
+      () => {
+        const timeoutMs = getBudgetBoundTimeoutMs(OPENROUTER_ANALYZER_TIMEOUT_MS, deadlineAtMs);
+        ensureEnoughBudgetForAttempt(timeoutMs, 'analyzer');
+        return withAbortableTimeout(
+          (signal) =>
+            createOpenRouterChatCompletion({
+              apiKey: openRouterApiKey,
+              model: analyzerModel,
+              signal,
+              messages: [
+                {
+                  role: 'system',
+                  content: analyzerSystemPrompt
+                },
+                ...history
+              ]
+            }),
+          timeoutMs,
+          'OpenRouter timeout',
+          () => {
+            metrics.openRouterAbortTimeouts += 1;
+          }
+        );
+      },
       {
         attempts: 3,
         baseDelayMs: 800,
-        shouldRetry: isRetryableNetworkError,
+        shouldRetry: (error) =>
+          isRetryableOpenRouterError(error, {
+            allowTimeoutRetry: true,
+            deadlineAtMs,
+            nextWaitMs: 800
+          }),
         onRetry: (error, attempt, waitMs) => {
           metrics.openRouterRetries += 1;
           logger.warn(
@@ -1208,8 +1271,9 @@ const buildAnalysis = async ({
       }
     );
   } catch (error) {
-    metrics.fallbacks += 1;
-    logger.warn({ err: error, chatId, context }, 'Falling back due to analyzer error');
+    const fallbackReason = classifyLlmFallbackReason('analyzer', error);
+    recordLlmFallbackMetric(metrics, fallbackReason);
+    logger.warn({ err: error, chatId, context, fallbackReason }, 'Falling back due to analyzer error');
     return 'Analysis unavailable due to transient upstream issue.';
   }
 };
@@ -1224,7 +1288,8 @@ const buildAnswer = async ({
   metrics,
   openRouterApiKey,
   reporterModel,
-  reporterSystemPrompt
+  reporterSystemPrompt,
+  deadlineAtMs
 }: {
   strategyMode: CoachMode;
   chatId: number;
@@ -1236,29 +1301,43 @@ const buildAnswer = async ({
   openRouterApiKey: string;
   reporterModel: string;
   reporterSystemPrompt: string;
+  deadlineAtMs?: number;
 }): Promise<string> => {
   try {
     return await retryAsync(
-      () =>
-        withTimeout(
-          createOpenRouterChatCompletion({
-            apiKey: openRouterApiKey,
-            model: reporterModel,
-            messages: [
-              {
-                role: 'system',
-                content: `${reporterSystemPrompt}\n\nInternal analysis:\n${analysis}`
-              },
-              ...history
-            ]
-          }),
-          OPENROUTER_REPORTER_TIMEOUT_MS,
-          'OpenRouter timeout'
-        ),
+      () => {
+        const timeoutMs = getBudgetBoundTimeoutMs(OPENROUTER_REPORTER_TIMEOUT_MS, deadlineAtMs);
+        ensureEnoughBudgetForAttempt(timeoutMs, 'reporter');
+        return withAbortableTimeout(
+          (signal) =>
+            createOpenRouterChatCompletion({
+              apiKey: openRouterApiKey,
+              model: reporterModel,
+              signal,
+              messages: [
+                {
+                  role: 'system',
+                  content: `${reporterSystemPrompt}\n\nInternal analysis:\n${analysis}`
+                },
+                ...history
+              ]
+            }),
+          timeoutMs,
+          'OpenRouter timeout',
+          () => {
+            metrics.openRouterAbortTimeouts += 1;
+          }
+        );
+      },
       {
-        attempts: 3,
+        attempts: 2,
         baseDelayMs: 800,
-        shouldRetry: isRetryableNetworkError,
+        shouldRetry: (error) =>
+          isRetryableOpenRouterError(error, {
+            allowTimeoutRetry: false,
+            deadlineAtMs,
+            nextWaitMs: 800
+          }),
         onRetry: (error, attempt, waitMs) => {
           metrics.openRouterRetries += 1;
           logger.warn(
@@ -1276,9 +1355,10 @@ const buildAnswer = async ({
       }
     );
   } catch (error) {
-    metrics.fallbacks += 1;
-    logger.warn({ err: error, chatId, context }, 'Falling back due to OpenRouter error');
-    return isTimeoutError(error) ? FALLBACK_REPLY_TIMEOUT : FALLBACK_REPLY;
+    const fallbackReason = classifyLlmFallbackReason('reporter', error);
+    recordLlmFallbackMetric(metrics, fallbackReason);
+    logger.warn({ err: error, chatId, context, fallbackReason }, 'Falling back due to OpenRouter error');
+    return isTimeoutError(error) || isBudgetTimeoutError(error) ? FALLBACK_REPLY_TIMEOUT : FALLBACK_REPLY;
   }
 };
 
@@ -1320,20 +1400,62 @@ const clampTelegramText = (text: string): string => {
   return `${text.slice(0, TELEGRAM_MESSAGE_MAX_LENGTH - 3)}...`;
 };
 
-const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> => {
+const withAbortableTimeout = async <T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+  errorMessage: string,
+  onAbortTimeout?: () => void
+): Promise<T> => {
+  const controller = new AbortController();
   let timeout: NodeJS.Timeout | undefined;
+  let didTimeout = false;
+
   try {
     return await Promise.race([
-      promise,
+      operation(controller.signal),
       new Promise<T>((_, reject) => {
-        timeout = setTimeout(() => reject(new Error(errorMessage)), timeoutMs);
+        timeout = setTimeout(() => {
+          didTimeout = true;
+          onAbortTimeout?.();
+          controller.abort();
+          reject(new Error(errorMessage));
+        }, timeoutMs);
       })
     ]);
+  } catch (error) {
+    if (didTimeout && isAbortSignalError(error)) {
+      throw new Error(errorMessage);
+    }
+    throw error;
   } finally {
     if (timeout) {
       clearTimeout(timeout);
     }
   }
+};
+
+const getRemainingBudgetMs = (deadlineAtMs?: number): number =>
+  Number.isFinite(deadlineAtMs) ? Math.max(0, Math.floor((deadlineAtMs as number) - Date.now())) : Number.POSITIVE_INFINITY;
+
+const getBudgetBoundTimeoutMs = (stageTimeoutMs: number, deadlineAtMs?: number): number => {
+  if (!Number.isFinite(deadlineAtMs)) {
+    return stageTimeoutMs;
+  }
+  return Math.min(stageTimeoutMs, Math.max(0, getRemainingBudgetMs(deadlineAtMs)));
+};
+
+const ensureEnoughBudgetForAttempt = (timeoutMs: number, stage: string): void => {
+  if (timeoutMs >= OPENROUTER_MIN_ATTEMPT_TIMEOUT_MS) {
+    return;
+  }
+  throw new Error(`OpenRouter ${stage} budget timeout`);
+};
+
+const hasRetryBudget = (deadlineAtMs: number | undefined, nextWaitMs: number): boolean => {
+  if (!Number.isFinite(deadlineAtMs)) {
+    return true;
+  }
+  return getRemainingBudgetMs(deadlineAtMs) >= nextWaitMs + OPENROUTER_MIN_RETRY_REMAINING_MS;
 };
 
 const retryAsync = async <T>(operation: () => Promise<T>, options: RetryOptions): Promise<T> => {
@@ -1393,6 +1515,76 @@ const isTimeoutError = (error: unknown): boolean => {
   return error.message.toLowerCase().includes('timeout');
 };
 
+const isBudgetTimeoutError = (error: unknown): boolean => {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return error.message.toLowerCase().includes('budget timeout');
+};
+
+const isAbortSignalError = (error: unknown): boolean => {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return error.name === 'AbortError' || error.message.toLowerCase().includes('aborted');
+};
+
+const isRetryableOpenRouterError = (
+  error: unknown,
+  options: {
+    allowTimeoutRetry: boolean;
+    deadlineAtMs?: number;
+    nextWaitMs: number;
+  }
+): boolean => {
+  if (isBudgetTimeoutError(error)) {
+    return false;
+  }
+  if (isTimeoutError(error) && !options.allowTimeoutRetry) {
+    return false;
+  }
+  if (!hasRetryBudget(options.deadlineAtMs, options.nextWaitMs)) {
+    return false;
+  }
+  return isRetryableNetworkError(error);
+};
+
+const classifyLlmFallbackReason = (
+  stage: 'analyzer' | 'reporter' | 'morning_summary' | 'transcription',
+  error: unknown
+): LlmFallbackReason => {
+  if (isBudgetTimeoutError(error)) {
+    return `${stage}_budget` as LlmFallbackReason;
+  }
+  if (isTimeoutError(error)) {
+    return `${stage}_timeout` as LlmFallbackReason;
+  }
+  return `${stage}_upstream` as LlmFallbackReason;
+};
+
+const recordLlmFallbackMetric = (metrics: WorkerMetrics, reason: LlmFallbackReason): void => {
+  metrics.fallbacks += 1;
+  switch (reason) {
+    case 'analyzer_timeout':
+      metrics.analyzerTimeoutFallbacks += 1;
+      break;
+    case 'reporter_timeout':
+      metrics.reporterTimeoutFallbacks += 1;
+      break;
+    case 'reporter_budget':
+      metrics.reporterBudgetFallbacks += 1;
+      break;
+    case 'morning_summary_timeout':
+      metrics.morningSummaryTimeoutFallbacks += 1;
+      break;
+    case 'transcription_timeout':
+      metrics.transcriptionTimeouts += 1;
+      break;
+    default:
+      break;
+  }
+};
+
 const createInitialMetrics = (): WorkerMetrics => ({
   processed: 0,
   succeeded: 0,
@@ -1400,6 +1592,12 @@ const createInitialMetrics = (): WorkerMetrics => ({
   openRouterRetries: 0,
   telegramRetries: 0,
   fallbacks: 0,
+  analyzerTimeoutFallbacks: 0,
+  reporterTimeoutFallbacks: 0,
+  reporterBudgetFallbacks: 0,
+  morningSummaryTimeoutFallbacks: 0,
+  transcriptionTimeouts: 0,
+  openRouterAbortTimeouts: 0,
   dlqPushed: 0
 });
 
@@ -1413,6 +1611,12 @@ const logMetricsSnapshot = (logger: AppLogger, metrics: WorkerMetrics): void => 
         openRouterRetries: metrics.openRouterRetries,
         telegramRetries: metrics.telegramRetries,
         fallbacks: metrics.fallbacks,
+        analyzerTimeoutFallbacks: metrics.analyzerTimeoutFallbacks,
+        reporterTimeoutFallbacks: metrics.reporterTimeoutFallbacks,
+        reporterBudgetFallbacks: metrics.reporterBudgetFallbacks,
+        morningSummaryTimeoutFallbacks: metrics.morningSummaryTimeoutFallbacks,
+        transcriptionTimeouts: metrics.transcriptionTimeouts,
+        openRouterAbortTimeouts: metrics.openRouterAbortTimeouts,
         dlqPushed: metrics.dlqPushed
       }
     },

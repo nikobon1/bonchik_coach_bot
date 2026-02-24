@@ -2,6 +2,7 @@ export type OpenRouterChatInput = {
   apiKey: string;
   model: string;
   messages: OpenRouterChatMessage[];
+  signal?: AbortSignal;
 };
 
 export type OpenRouterChatMessage = {
@@ -24,10 +25,12 @@ type OpenRouterTranscriptionResponse = {
 export const createOpenRouterChatCompletion = async ({
   apiKey,
   model,
-  messages
+  messages,
+  signal
 }: OpenRouterChatInput): Promise<string> => {
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
+    signal,
     headers: {
       Authorization: `Bearer ${apiKey}`,
       'content-type': 'application/json'
@@ -59,6 +62,7 @@ export type OpenRouterTranscriptionInput = {
   bytes: ArrayBuffer;
   filename: string;
   mimeType?: string | null;
+  signal?: AbortSignal;
 };
 
 export const createOpenRouterTranscription = async ({
@@ -66,7 +70,8 @@ export const createOpenRouterTranscription = async ({
   model,
   bytes,
   filename,
-  mimeType
+  mimeType,
+  signal
 }: OpenRouterTranscriptionInput): Promise<string> => {
   const form = new FormData();
   form.append('model', model);
@@ -74,6 +79,7 @@ export const createOpenRouterTranscription = async ({
 
   const response = await fetch('https://openrouter.ai/api/v1/audio/transcriptions', {
     method: 'POST',
+    signal,
     headers: {
       Authorization: `Bearer ${apiKey}`
     },
