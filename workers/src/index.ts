@@ -96,6 +96,7 @@ type TelegramReplyLatencySnapshot = {
 const OPENROUTER_TRANSCRIBER_TIMEOUT_MS = 20_000;
 const OPENROUTER_ANALYZER_TIMEOUT_MS = 35_000;
 const OPENROUTER_REPORTER_TIMEOUT_MS = 25_000;
+const OPENROUTER_REPORTER_FAST_TIMEOUT_MS = 12_000;
 const OPENROUTER_DAILY_SUMMARY_TIMEOUT_MS = 30_000;
 const TELEGRAM_REPLY_TOTAL_BUDGET_MS = 60_000;
 const OPENROUTER_MIN_ATTEMPT_TIMEOUT_MS = 4_000;
@@ -115,6 +116,12 @@ type SummaryWindow = {
   summaryDate: string;
   fromInclusive: string;
   toExclusive: string;
+};
+
+type BuiltAnswerResult = {
+  answer: string;
+  reporterModelUsed: string;
+  usedFastReporterFallback: boolean;
 };
 
 type LlmFallbackReason =
@@ -316,6 +323,7 @@ const startWorker = async (): Promise<void> => {
         config.OPENROUTER_MODEL_TRANSCRIBER,
         config.OPENROUTER_MODEL_ANALYZER,
         config.OPENROUTER_MODEL_REPORTER,
+        config.OPENROUTER_MODEL_REPORTER_FAST ?? config.OPENROUTER_MODEL_ANALYZER,
         config.TELEGRAM_BOT_TOKEN,
         logger,
         metrics
@@ -393,6 +401,7 @@ const processTelegramJob = async (
   transcriberModel: string,
   analyzerModel: string,
   reporterModel: string,
+  reporterFastModel: string | undefined,
   telegramBotToken: string,
   logger: AppLogger,
   metrics: WorkerMetrics
@@ -609,6 +618,8 @@ const processTelegramJob = async (
   let analyzerDurationMs: number | null = null;
   let reporterDurationMs: number | null = null;
   let telegramSendDurationMs: number | null = null;
+  let reporterModelUsed = reporterModel;
+  let usedFastReporterFallback = false;
   const {
     result: { analysis, answer },
     sent: progressNoticeSent
@@ -640,7 +651,7 @@ const processTelegramJob = async (
           analyzerDurationMs = Date.now() - analyzerStartedAtMs;
 
           const reporterStartedAtMs = Date.now();
-          const generatedAnswer = await buildAnswer({
+          const builtAnswer = await buildAnswer({
             strategyMode: strategy.mode,
             chatId: payload.chatId,
             context,
@@ -650,12 +661,15 @@ const processTelegramJob = async (
             metrics,
             openRouterApiKey,
             reporterModel,
+            reporterFastModel,
             reporterSystemPrompt: strategy.reporterSystemPrompt,
             deadlineAtMs: llmReplyDeadlineAtMs
           });
           reporterDurationMs = Date.now() - reporterStartedAtMs;
+          reporterModelUsed = builtAnswer.reporterModelUsed;
+          usedFastReporterFallback = builtAnswer.usedFastReporterFallback;
 
-          const answer = clampTelegramText(generatedAnswer);
+          const answer = clampTelegramText(builtAnswer.answer);
 
           const telegramSendStartedAtMs = Date.now();
           await retryAsync(
@@ -714,7 +728,9 @@ const processTelegramJob = async (
       llmBudget: {
         totalMs: TELEGRAM_REPLY_TOTAL_BUDGET_MS,
         remainingAfterReplyMs: getRemainingBudgetMs(llmReplyDeadlineAtMs)
-      }
+      },
+      reporterModelUsed,
+      usedFastReporterFallback
     },
     'Telegram reply latency snapshot'
   );
@@ -733,7 +749,7 @@ const processTelegramJob = async (
     updateId: payload.updateId,
     coachMode: strategy.mode,
     analyzerModel,
-    reporterModel,
+    reporterModel: reporterModelUsed,
     userText: userInputText,
     analysis,
     reply: answer,
@@ -1288,6 +1304,7 @@ const buildAnswer = async ({
   metrics,
   openRouterApiKey,
   reporterModel,
+  reporterFastModel,
   reporterSystemPrompt,
   deadlineAtMs
 }: {
@@ -1300,34 +1317,38 @@ const buildAnswer = async ({
   metrics: WorkerMetrics;
   openRouterApiKey: string;
   reporterModel: string;
+  reporterFastModel?: string;
   reporterSystemPrompt: string;
   deadlineAtMs?: number;
-}): Promise<string> => {
+}): Promise<BuiltAnswerResult> => {
+  const buildReporterRequest = (model: string, timeoutMs: number): Promise<string> =>
+    withAbortableTimeout(
+      (signal) =>
+        createOpenRouterChatCompletion({
+          apiKey: openRouterApiKey,
+          model,
+          signal,
+          messages: [
+            {
+              role: 'system',
+              content: `${reporterSystemPrompt}\n\nInternal analysis:\n${analysis}`
+            },
+            ...history
+          ]
+        }),
+      timeoutMs,
+      'OpenRouter timeout',
+      () => {
+        metrics.openRouterAbortTimeouts += 1;
+      }
+    );
+
   try {
-    return await retryAsync(
+    const primaryAnswer = await retryAsync(
       () => {
         const timeoutMs = getBudgetBoundTimeoutMs(OPENROUTER_REPORTER_TIMEOUT_MS, deadlineAtMs);
         ensureEnoughBudgetForAttempt(timeoutMs, 'reporter');
-        return withAbortableTimeout(
-          (signal) =>
-            createOpenRouterChatCompletion({
-              apiKey: openRouterApiKey,
-              model: reporterModel,
-              signal,
-              messages: [
-                {
-                  role: 'system',
-                  content: `${reporterSystemPrompt}\n\nInternal analysis:\n${analysis}`
-                },
-                ...history
-              ]
-            }),
-          timeoutMs,
-          'OpenRouter timeout',
-          () => {
-            metrics.openRouterAbortTimeouts += 1;
-          }
-        );
+        return buildReporterRequest(reporterModel, timeoutMs);
       },
       {
         attempts: 2,
@@ -1354,11 +1375,71 @@ const buildAnswer = async ({
         }
       }
     );
+    return {
+      answer: primaryAnswer,
+      reporterModelUsed: reporterModel,
+      usedFastReporterFallback: false
+    };
   } catch (error) {
+    const canTryFastReporter =
+      Boolean(reporterFastModel) &&
+      reporterFastModel !== reporterModel &&
+      isTimeoutError(error) &&
+      getRemainingBudgetMs(deadlineAtMs) >= OPENROUTER_MIN_ATTEMPT_TIMEOUT_MS;
+
+    if (canTryFastReporter && reporterFastModel) {
+      try {
+        const fastTimeoutMs = getBudgetBoundTimeoutMs(OPENROUTER_REPORTER_FAST_TIMEOUT_MS, deadlineAtMs);
+        ensureEnoughBudgetForAttempt(fastTimeoutMs, 'reporter fast');
+        logger.warn(
+          {
+            err: error,
+            chatId,
+            context,
+            primaryReporterModel: reporterModel,
+            fastReporterModel: reporterFastModel,
+            fastTimeoutMs,
+            remainingBudgetMs: getRemainingBudgetMs(deadlineAtMs)
+          },
+          'Primary reporter timed out, trying fast reporter fallback model'
+        );
+        const fastAnswer = await buildReporterRequest(reporterFastModel, fastTimeoutMs);
+        logger.info(
+          {
+            chatId,
+            context,
+            primaryReporterModel: reporterModel,
+            reporterModelUsed: reporterFastModel
+          },
+          'Fast reporter fallback model succeeded'
+        );
+        return {
+          answer: fastAnswer,
+          reporterModelUsed: reporterFastModel,
+          usedFastReporterFallback: true
+        };
+      } catch (fastError) {
+        logger.warn(
+          {
+            err: fastError,
+            chatId,
+            context,
+            primaryReporterModel: reporterModel,
+            fastReporterModel: reporterFastModel
+          },
+          'Fast reporter fallback model failed'
+        );
+      }
+    }
+
     const fallbackReason = classifyLlmFallbackReason('reporter', error);
     recordLlmFallbackMetric(metrics, fallbackReason);
     logger.warn({ err: error, chatId, context, fallbackReason }, 'Falling back due to OpenRouter error');
-    return isTimeoutError(error) || isBudgetTimeoutError(error) ? FALLBACK_REPLY_TIMEOUT : FALLBACK_REPLY;
+    return {
+      answer: isTimeoutError(error) || isBudgetTimeoutError(error) ? FALLBACK_REPLY_TIMEOUT : FALLBACK_REPLY,
+      reporterModelUsed: reporterModel,
+      usedFastReporterFallback: false
+    };
   }
 };
 

@@ -23,6 +23,7 @@ const envSchema = z.object({
   OPENROUTER_API_KEY: z.string().min(1),
   OPENROUTER_MODEL_ANALYZER: z.string().min(1),
   OPENROUTER_MODEL_REPORTER: z.string().min(1),
+  OPENROUTER_MODEL_REPORTER_FAST: z.string().min(1).optional(),
   OPENROUTER_MODEL_EMBEDDING: z.string().min(1),
   OPENROUTER_MODEL_TRANSCRIBER: z.string().min(1).default('openai/whisper-1'),
   DATABASE_URL: z.string().url(),
