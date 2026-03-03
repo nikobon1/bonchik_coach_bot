@@ -13,3 +13,13 @@ export const markTelegramUpdateProcessed = async (pool: Pool, updateId: number):
 
   return (result.rowCount ?? 0) > 0;
 };
+
+export const releaseTelegramProcessedUpdate = async (pool: Pool, updateId: number): Promise<void> => {
+  await pool.query(
+    `
+      DELETE FROM telegram_processed_updates
+      WHERE update_id = $1
+    `,
+    [updateId]
+  );
+};

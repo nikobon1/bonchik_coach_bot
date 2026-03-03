@@ -34,6 +34,7 @@ const envSchema = z.object({
   MORNING_SUMMARY_ENABLED: booleanFromEnv.default(true),
   MORNING_SUMMARY_CRON: z.string().min(1).default('0 8 * * *'),
   MORNING_SUMMARY_TZ: z.string().min(1).default('Europe/Moscow'),
+  TELEGRAM_WORKER_CONCURRENCY: z.coerce.number().int().positive().max(20).default(1),
   PORT: z.coerce.number().int().positive().default(3000),
   APP_ROLE: z.enum(['api', 'worker']).default('api')
 });

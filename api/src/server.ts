@@ -1,5 +1,6 @@
 import { buildApp } from './app';
 import {
+  assertRedisAvailable,
   checkDbHealth,
   createDbPool,
   createLogger,
@@ -18,6 +19,7 @@ import {
   loadConfig,
   markTelegramUpdateProcessed,
   pingRedis,
+  releaseTelegramProcessedUpdate,
   requeueDlqJob,
   runMigrations,
   sendTelegramChatAction,
@@ -29,6 +31,7 @@ export const startServer = async (): Promise<void> => {
   const logger = createLogger('api');
   const pool = createDbPool(config.DATABASE_URL);
   await runMigrations(pool);
+  await assertRedisAvailable(config.REDIS_URL);
   const redis = createRedisConnection(config.REDIS_URL);
   const queue = createTelegramQueue(config.REDIS_URL);
   const dlqQueue = createTelegramDlqQueue(config.REDIS_URL);
@@ -57,6 +60,7 @@ export const startServer = async (): Promise<void> => {
         await enqueueTelegramJob(queue, payload);
       },
       markUpdateProcessed: (updateId) => markTelegramUpdateProcessed(pool, updateId),
+      releaseUpdateProcessed: (updateId) => releaseTelegramProcessedUpdate(pool, updateId),
       getQueueHealth: async () => ({
         main: await getQueueCounts(queue),
         dlq: await getQueueCounts(dlqQueue)

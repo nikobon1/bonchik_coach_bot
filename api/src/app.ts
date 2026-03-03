@@ -20,6 +20,7 @@ type BuildAppOptions = {
     sendChatAction?: (chatId: number, action: 'typing') => Promise<void>;
     enqueueMessage: (payload: TelegramMessagePayload) => Promise<void>;
     markUpdateProcessed: (updateId: number) => Promise<boolean>;
+    releaseUpdateProcessed?: (updateId: number) => Promise<void>;
     getQueueHealth: () => Promise<{
       main: Record<string, number>;
       dlq: Record<string, number>;
@@ -325,14 +326,29 @@ export const buildApp = ({ logger, checks, telegram, adminApiKey, rateLimit }: B
       }
     }
 
-    await telegram.enqueueMessage({
-      updateId: parsed.data.update_id,
-      chatId,
-      userId,
-      username,
-      text: parsed.data.message.text,
-      media
-    });
+    try {
+      await telegram.enqueueMessage({
+        updateId: parsed.data.update_id,
+        chatId,
+        userId,
+        username,
+        text: parsed.data.message.text,
+        media
+      });
+    } catch (error) {
+      if (telegram.releaseUpdateProcessed) {
+        try {
+          await telegram.releaseUpdateProcessed(parsed.data.update_id);
+        } catch (releaseError) {
+          app.log.error(
+            { err: releaseError, updateId: parsed.data.update_id },
+            'Failed to release processed Telegram update after enqueue failure'
+          );
+        }
+      }
+
+      throw error;
+    }
 
     return { ok: true };
   });

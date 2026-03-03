@@ -25,23 +25,32 @@ export type TelegramDownloadedFile = {
   contentType: string | null;
 };
 
+const TELEGRAM_API_TIMEOUT_MS = 15_000;
+const TELEGRAM_FILE_TIMEOUT_MS = 20_000;
+
 export const sendTelegramMessage = async ({
   botToken,
   chatId,
   text,
   replyMarkup
 }: TelegramSendMessageInput): Promise<void> => {
-  const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json'
-    },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      reply_markup: replyMarkup
-    })
-  });
+  const response = await withTelegramTimeout(
+    (signal) =>
+      fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        signal,
+        headers: {
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text,
+          reply_markup: replyMarkup
+        })
+      }),
+    TELEGRAM_API_TIMEOUT_MS,
+    'Telegram sendMessage'
+  );
 
   if (!response.ok) {
     const body = await response.text();
@@ -54,16 +63,22 @@ export const sendTelegramChatAction = async ({
   chatId,
   action
 }: TelegramSendChatActionInput): Promise<void> => {
-  const response = await fetch(`https://api.telegram.org/bot${botToken}/sendChatAction`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json'
-    },
-    body: JSON.stringify({
-      chat_id: chatId,
-      action
-    })
-  });
+  const response = await withTelegramTimeout(
+    (signal) =>
+      fetch(`https://api.telegram.org/bot${botToken}/sendChatAction`, {
+        method: 'POST',
+        signal,
+        headers: {
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          chat_id: chatId,
+          action
+        })
+      }),
+    TELEGRAM_API_TIMEOUT_MS,
+    'Telegram sendChatAction'
+  );
 
   if (!response.ok) {
     const body = await response.text();
@@ -73,16 +88,22 @@ export const sendTelegramChatAction = async ({
 
 export const setTelegramWebhook = async ({ botToken, appUrl, secretToken }: TelegramWebhookInput): Promise<void> => {
   const webhookUrl = `${appUrl.replace(/\/$/, '')}/telegram/webhook`;
-  const response = await fetch(`https://api.telegram.org/bot${botToken}/setWebhook`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json'
-    },
-    body: JSON.stringify({
-      url: webhookUrl,
-      secret_token: secretToken
-    })
-  });
+  const response = await withTelegramTimeout(
+    (signal) =>
+      fetch(`https://api.telegram.org/bot${botToken}/setWebhook`, {
+        method: 'POST',
+        signal,
+        headers: {
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          url: webhookUrl,
+          secret_token: secretToken
+        })
+      }),
+    TELEGRAM_API_TIMEOUT_MS,
+    'Telegram setWebhook'
+  );
 
   if (!response.ok) {
     const body = await response.text();
@@ -102,15 +123,21 @@ export const downloadTelegramFileById = async (
   botToken: string,
   fileId: string
 ): Promise<TelegramDownloadedFile> => {
-  const getFileResponse = await fetch(`https://api.telegram.org/bot${botToken}/getFile`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json'
-    },
-    body: JSON.stringify({
-      file_id: fileId
-    })
-  });
+  const getFileResponse = await withTelegramTimeout(
+    (signal) =>
+      fetch(`https://api.telegram.org/bot${botToken}/getFile`, {
+        method: 'POST',
+        signal,
+        headers: {
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          file_id: fileId
+        })
+      }),
+    TELEGRAM_API_TIMEOUT_MS,
+    'Telegram getFile'
+  );
 
   if (!getFileResponse.ok) {
     const body = await getFileResponse.text();
@@ -123,7 +150,11 @@ export const downloadTelegramFileById = async (
     throw new Error(`Telegram getFile failed: ${getFileData.description ?? 'missing file_path'}`);
   }
 
-  const downloadResponse = await fetch(`https://api.telegram.org/file/bot${botToken}/${filePath}`);
+  const downloadResponse = await withTelegramTimeout(
+    (signal) => fetch(`https://api.telegram.org/file/bot${botToken}/${filePath}`, { signal }),
+    TELEGRAM_FILE_TIMEOUT_MS,
+    'Telegram file download'
+  );
   if (!downloadResponse.ok) {
     const body = await downloadResponse.text();
     throw new Error(`Telegram file download failed (${downloadResponse.status}): ${body}`);
@@ -134,4 +165,36 @@ export const downloadTelegramFileById = async (
     bytes: await downloadResponse.arrayBuffer(),
     contentType: downloadResponse.headers.get('content-type')
   };
+};
+
+const withTelegramTimeout = async <T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+  label: string
+): Promise<T> => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+
+  timeout.unref?.();
+
+  try {
+    return await operation(controller.signal);
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new Error(`${label} timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+const isAbortError = (error: unknown): boolean => {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  return error.name === 'AbortError' || error.message.toLowerCase().includes('aborted');
 };

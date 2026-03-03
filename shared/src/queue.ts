@@ -164,7 +164,10 @@ export const requeueDlqJob = async (
 export const createTelegramWorker = (
   redisUrl: string,
   logger: pino.Logger,
-  processor: TelegramJobProcessor
+  processor: TelegramJobProcessor,
+  options?: {
+    concurrency?: number;
+  }
 ) =>
   new Worker<TelegramJobPayload>(
     TELEGRAM_QUEUE,
@@ -189,7 +192,7 @@ export const createTelegramWorker = (
     },
     {
       connection: { url: redisUrl },
-      concurrency: 10
+      concurrency: options?.concurrency ?? 1
     }
   );
 

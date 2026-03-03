@@ -5,6 +5,7 @@ import { createLogger } from '@bonchik/shared';
 const run = async (): Promise<void> => {
   let queued = 0;
   let requeued = 0;
+  const releasedUpdates: number[] = [];
   const seenUpdates = new Set<number>();
   const todayUtc = new Date().toISOString().slice(0, 10);
   const healthyApp = buildApp({
@@ -20,7 +21,10 @@ const run = async (): Promise<void> => {
     },
     telegram: {
       webhookSecret: 'test-webhook-secret',
-      enqueueMessage: async () => {
+      enqueueMessage: async (payload) => {
+        if (payload.updateId === 777 && !releasedUpdates.includes(payload.updateId)) {
+          throw new Error('queue unavailable');
+        }
         queued += 1;
       },
       markUpdateProcessed: async (updateId) => {
@@ -29,6 +33,10 @@ const run = async (): Promise<void> => {
         }
         seenUpdates.add(updateId);
         return true;
+      },
+      releaseUpdateProcessed: async (updateId) => {
+        releasedUpdates.push(updateId);
+        seenUpdates.delete(updateId);
       },
       getQueueHealth: async () => ({
         main: { waiting: 1, active: 0, completed: 0, failed: 0, delayed: 0 },
@@ -173,6 +181,42 @@ const run = async (): Promise<void> => {
   assert.equal(voiceWebhookResponse.statusCode, 200);
   assert.equal(queued, 2);
 
+  const failedWebhookResponse = await healthyApp.inject({
+    method: 'POST',
+    url: '/telegram/webhook',
+    payload: {
+      update_id: 777,
+      message: {
+        text: 'retry me',
+        chat: { id: 1 },
+        from: { id: 2, username: 'tester' }
+      }
+    },
+    headers: {
+      'x-telegram-bot-api-secret-token': 'test-webhook-secret'
+    }
+  });
+  assert.equal(failedWebhookResponse.statusCode, 500);
+  assert.deepEqual(releasedUpdates, [777]);
+
+  const retriedWebhookResponse = await healthyApp.inject({
+    method: 'POST',
+    url: '/telegram/webhook',
+    payload: {
+      update_id: 777,
+      message: {
+        text: 'retry me',
+        chat: { id: 1 },
+        from: { id: 2, username: 'tester' }
+      }
+    },
+    headers: {
+      'x-telegram-bot-api-secret-token': 'test-webhook-secret'
+    }
+  });
+  assert.equal(retriedWebhookResponse.statusCode, 200);
+  assert.equal(queued, 3);
+
   const adminUnauthorized = await healthyApp.inject({
     method: 'GET',
     url: '/admin/queue/health'
@@ -287,6 +331,7 @@ const run = async (): Promise<void> => {
       webhookSecret: 'test-webhook-secret',
       enqueueMessage: async () => undefined,
       markUpdateProcessed: async () => true,
+      releaseUpdateProcessed: async () => undefined,
       getQueueHealth: async () => ({
         main: { waiting: 0, active: 0, completed: 0, failed: 0, delayed: 0 },
         dlq: { waiting: 0, active: 0, completed: 0, failed: 0, delayed: 0 }
@@ -339,6 +384,7 @@ const run = async (): Promise<void> => {
       webhookSecret: 'test-webhook-secret',
       enqueueMessage: async () => undefined,
       markUpdateProcessed: async () => true,
+      releaseUpdateProcessed: async () => undefined,
       getQueueHealth: async () => ({
         main: { waiting: 0, active: 0, completed: 0, failed: 0, delayed: 0 },
         dlq: { waiting: 0, active: 0, completed: 0, failed: 0, delayed: 0 }

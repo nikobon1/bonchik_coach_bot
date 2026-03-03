@@ -3,6 +3,7 @@ import {
   appendTelegramFeedback,
   appendTelegramFlowEvent,
   appendTelegramReport,
+  assertRedisAvailable,
   buildFeedbackInputKeyboard,
   buildModeRecommendationKeyboard,
   createOpenRouterTranscription,
@@ -288,9 +289,10 @@ const startWorker = async (): Promise<void> => {
   const logger = createLogger('worker');
   const metrics = createInitialMetrics();
   const pool = createDbPool(config.DATABASE_URL);
+  await runMigrations(pool);
+  await assertRedisAvailable(config.REDIS_URL);
   const dlqQueue = createTelegramDlqQueue(config.REDIS_URL);
   const morningSummaryQueue = createMorningSummaryQueue(config.REDIS_URL);
-  await runMigrations(pool);
 
   if (config.MORNING_SUMMARY_ENABLED) {
     await ensureMorningSummarySchedule(
@@ -309,42 +311,49 @@ const startWorker = async (): Promise<void> => {
     logger.info('Morning summary schedule disabled by config');
   }
 
-  const worker = createTelegramWorker(config.REDIS_URL, logger, async (payload, context) => {
-    const correlation = toCorrelation(payload, context);
-    metrics.processed += 1;
-    logger.info(correlation, 'Job started');
+  const worker = createTelegramWorker(
+    config.REDIS_URL,
+    logger,
+    async (payload, context) => {
+      const correlation = toCorrelation(payload, context);
+      metrics.processed += 1;
+      logger.info(correlation, 'Job started');
 
-    try {
-      await processTelegramJob(
-        payload,
-        context,
-        pool,
-        config.OPENROUTER_API_KEY,
-        config.OPENROUTER_MODEL_TRANSCRIBER,
-        config.OPENROUTER_MODEL_ANALYZER,
-        config.OPENROUTER_MODEL_REPORTER,
-        config.OPENROUTER_MODEL_REPORTER_FAST ?? config.OPENROUTER_MODEL_ANALYZER,
-        config.TELEGRAM_BOT_TOKEN,
-        logger,
-        metrics
-      );
-      metrics.succeeded += 1;
-      logger.info(correlation, 'Job succeeded');
-    } catch (error) {
-      metrics.failed += 1;
-      await enqueueTelegramDlqJob(dlqQueue, {
-        originalJobId: correlation.jobId,
-        originalQueue: correlation.queue,
-        attemptsMade: context.attemptsMade,
-        failedAt: new Date().toISOString(),
-        errorMessage: formatErrorMessage(error),
-        payload
-      });
-      metrics.dlqPushed += 1;
-      logger.error({ err: error, ...correlation }, 'Job failed');
-      throw error;
+      try {
+        await processTelegramJob(
+          payload,
+          context,
+          pool,
+          config.OPENROUTER_API_KEY,
+          config.OPENROUTER_MODEL_TRANSCRIBER,
+          config.OPENROUTER_MODEL_ANALYZER,
+          config.OPENROUTER_MODEL_REPORTER,
+          config.OPENROUTER_MODEL_REPORTER_FAST ?? config.OPENROUTER_MODEL_ANALYZER,
+          config.TELEGRAM_BOT_TOKEN,
+          logger,
+          metrics
+        );
+        metrics.succeeded += 1;
+        logger.info(correlation, 'Job succeeded');
+      } catch (error) {
+        metrics.failed += 1;
+        await enqueueTelegramDlqJob(dlqQueue, {
+          originalJobId: correlation.jobId,
+          originalQueue: correlation.queue,
+          attemptsMade: context.attemptsMade,
+          failedAt: new Date().toISOString(),
+          errorMessage: formatErrorMessage(error),
+          payload
+        });
+        metrics.dlqPushed += 1;
+        logger.error({ err: error, ...correlation }, 'Job failed');
+        throw error;
+      }
+    },
+    {
+      concurrency: config.TELEGRAM_WORKER_CONCURRENCY
     }
-  });
+  );
 
   const morningSummaryWorker = createMorningSummaryWorker(
     config.REDIS_URL,
@@ -390,7 +399,7 @@ const startWorker = async (): Promise<void> => {
     void shutdown('SIGTERM');
   });
 
-  logger.info('Worker started and waiting for jobs');
+  logger.info({ concurrency: config.TELEGRAM_WORKER_CONCURRENCY }, 'Worker started and waiting for jobs');
 };
 
 const processTelegramJob = async (
@@ -735,30 +744,50 @@ const processTelegramJob = async (
     'Telegram reply latency snapshot'
   );
 
-  await appendChatMessage(pool, {
-    chatId: payload.chatId,
-    userId: payload.userId,
-    username: payload.username,
-    role: 'assistant',
-    content: answer
+  await runPostDeliveryTask({
+    logger,
+    label: 'append assistant chat message',
+    context: {
+      chatId: payload.chatId,
+      userId: payload.userId,
+      updateId: payload.updateId
+    },
+    task: () =>
+      appendChatMessage(pool, {
+        chatId: payload.chatId,
+        userId: payload.userId,
+        username: payload.username,
+        role: 'assistant',
+        content: answer
+      })
   });
 
-  await appendTelegramReport(pool, {
-    chatId: payload.chatId,
-    userId: payload.userId,
-    updateId: payload.updateId,
-    coachMode: strategy.mode,
-    analyzerModel,
-    reporterModel: reporterModelUsed,
-    userText: userInputText,
-    analysis,
-    reply: answer,
-    queueWaitMs: latency.queueWaitMs,
-    inputResolutionMs: latency.inputResolutionMs,
-    analyzerDurationMs: latency.analyzerDurationMs,
-    reporterDurationMs: latency.reporterDurationMs,
-    telegramSendDurationMs: latency.telegramSendDurationMs,
-    totalDurationMs: latency.totalDurationMs
+  await runPostDeliveryTask({
+    logger,
+    label: 'append telegram report',
+    context: {
+      chatId: payload.chatId,
+      userId: payload.userId,
+      updateId: payload.updateId
+    },
+    task: () =>
+      appendTelegramReport(pool, {
+        chatId: payload.chatId,
+        userId: payload.userId,
+        updateId: payload.updateId,
+        coachMode: strategy.mode,
+        analyzerModel,
+        reporterModel: reporterModelUsed,
+        userText: userInputText,
+        analysis,
+        reply: answer,
+        queueWaitMs: latency.queueWaitMs,
+        inputResolutionMs: latency.inputResolutionMs,
+        analyzerDurationMs: latency.analyzerDurationMs,
+        reporterDurationMs: latency.reporterDurationMs,
+        telegramSendDurationMs: latency.telegramSendDurationMs,
+        totalDurationMs: latency.totalDurationMs
+      })
   });
 };
 
@@ -860,23 +889,44 @@ const processMorningSummaryJob = async ({
       }
     );
 
-    await appendChatMessage(pool, {
-      chatId: chatRef.chatId,
-      userId: chatRef.userId,
-      role: 'assistant',
-      content: messageText
+    await runPostDeliveryTask({
+      logger,
+      label: 'append morning summary chat message',
+      context: {
+        chatId: chatRef.chatId,
+        userId: chatRef.userId,
+        summaryDate: window.summaryDate
+      },
+      task: () =>
+        appendChatMessage(pool, {
+          chatId: chatRef.chatId,
+          userId: chatRef.userId,
+          role: 'assistant',
+          content: messageText
+        })
     });
 
-    const recorded = await recordTelegramDailySummarySent(pool, {
-      chatId: chatRef.chatId,
-      userId: chatRef.userId,
-      summaryDate: window.summaryDate,
-      timezone,
-      reportsCount: reports.length,
-      windowStartAt: window.fromInclusive,
-      windowEndAt: window.toExclusive,
-      summaryText: messageText
-    });
+    const recorded =
+      (await runPostDeliveryTask({
+        logger,
+        label: 'record morning summary delivery',
+        context: {
+          chatId: chatRef.chatId,
+          userId: chatRef.userId,
+          summaryDate: window.summaryDate
+        },
+        task: () =>
+          recordTelegramDailySummarySent(pool, {
+            chatId: chatRef.chatId,
+            userId: chatRef.userId,
+            summaryDate: window.summaryDate,
+            timezone,
+            reportsCount: reports.length,
+            windowStartAt: window.fromInclusive,
+            windowEndAt: window.toExclusive,
+            summaryText: messageText
+          })
+      })) ?? false;
 
     logger.info(
       {
@@ -1462,12 +1512,22 @@ const handleModeSwitchCommand = async (
     replyMarkup: buildMainKeyboard()
   });
 
-  await appendChatMessage(pool, {
-    chatId: payload.chatId,
-    userId: payload.userId,
-    username: payload.username,
-    role: 'assistant',
-    content: response
+  await runPostDeliveryTask({
+    logger,
+    label: 'append mode switch chat message',
+    context: {
+      chatId: payload.chatId,
+      userId: payload.userId,
+      mode: strategy.mode
+    },
+    task: () =>
+      appendChatMessage(pool, {
+        chatId: payload.chatId,
+        userId: payload.userId,
+        username: payload.username,
+        role: 'assistant',
+        content: response
+      })
   });
 
   logger.info({ chatId: payload.chatId, userId: payload.userId, mode: strategy.mode }, 'User coach mode updated');
@@ -1566,6 +1626,32 @@ const delay = async (ms: number): Promise<void> =>
   new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+
+const runPostDeliveryTask = async <T>({
+  logger,
+  label,
+  context,
+  task
+}: {
+  logger: AppLogger;
+  label: string;
+  context: Record<string, unknown>;
+  task: () => Promise<T>;
+}): Promise<T | undefined> => {
+  try {
+    return await task();
+  } catch (error) {
+    logger.warn(
+      {
+        err: error,
+        ...context,
+        task: label
+      },
+      'Post-delivery persistence failed; skipping retry to avoid duplicate Telegram message'
+    );
+    return undefined;
+  }
+};
 
 const isRetryableNetworkError = (error: unknown): boolean => {
   if (!(error instanceof Error)) {
@@ -1722,4 +1808,7 @@ const toCorrelation = (
   userId: payload.userId
 });
 
-void startWorker();
+void startWorker().catch((error) => {
+  createLogger('worker').fatal({ err: error }, 'Worker bootstrap failed');
+  process.exit(1);
+});
